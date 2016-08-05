@@ -321,7 +321,7 @@ set(CLANG_BIN_DIR "${PROJECT_BINARY_DIR}/compiler")
 file(MAKE_DIRECTORY ${CLANG_BIN_DIR})
 if (HAS_HSA)
 add_custom_target(clang
-  COMMAND ${CMAKE_COMMAND} -Wno-dev ${CLANG_SRC_DIR}
+  COMMAND ${CMAKE_COMMAND} -Wno-dev -G Ninja ${CLANG_SRC_DIR}
           -DHAS_HSA=${HAS_HSA}
           -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
           -DKALMAR_VERSION_STRING=${KALMAR_VERSION_STRING}
@@ -334,12 +334,12 @@ add_custom_target(clang
           -DKALMAR_BACKEND=${KALMAR_BACKEND}
           -DLLVM_TARGETS_TO_BUILD=X86
           -DLLVM_INCLUDE_EXAMPLES=off
-  COMMAND make -j ${NUM_BUILD_THREADS} # not portable, but we need it this way
+  COMMAND ninja
   WORKING_DIRECTORY ${CLANG_BIN_DIR}
 )
 else (HAS_HSA)
 add_custom_target(clang
-  COMMAND ${CMAKE_COMMAND} -Wno-dev ${CLANG_SRC_DIR}
+  COMMAND ${CMAKE_COMMAND} -Wno-dev -G Ninja ${CLANG_SRC_DIR}
           -DHAS_HSA=${HAS_HSA}
           -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
           -DKALMAR_VERSION_STRING=${KALMAR_VERSION_STRING}
@@ -351,7 +351,7 @@ add_custom_target(clang
           -DKALMAR_BACKEND=${KALMAR_BACKEND}
           -DLLVM_TARGETS_TO_BUILD=X86
           -DLLVM_INCLUDE_EXAMPLES=off
-  COMMAND make -j ${NUM_BUILD_THREADS} # not portable, but we need it this way
+  COMMAND ninja
   WORKING_DIRECTORY ${CLANG_BIN_DIR}
 )
 endif (HAS_HSA)
@@ -422,13 +422,13 @@ set(HLC_SRC_DIR "${PROJECT_SOURCE_DIR}/hlc")
 set(HLC_BIN_DIR "${PROJECT_BINARY_DIR}/hlc")
 file(MAKE_DIRECTORY ${HLC_BIN_DIR})
 add_custom_target(hlc
-  COMMAND ${CMAKE_COMMAND} -Wno-dev ${HLC_SRC_DIR}
+  COMMAND ${CMAKE_COMMAND} -Wno-dev -G Ninja ${HLC_SRC_DIR}
           -DLLVM_ENABLE_EH=ON
           -DLLVM_ENABLE_RTTI=ON
           -DLLVM_TARGETS_TO_BUILD=
           -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=HSAIL
           -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-  COMMAND make -j ${NUM_BUILD_THREADS} # not portable, but we need it this way
+  COMMAND ninja
   WORKING_DIRECTORY ${HLC_BIN_DIR}
   DEPENDS clang
 )
@@ -445,8 +445,8 @@ set(HSAILASM_SRC_DIR "${PROJECT_SOURCE_DIR}/HSAILasm")
 set(HSAILASM_BIN_DIR "${PROJECT_BINARY_DIR}/HSAILasm")
 file(MAKE_DIRECTORY ${HSAILASM_BIN_DIR})
 add_custom_target(HSAILasm
-  COMMAND ${CMAKE_COMMAND} -Wno-dev -DBUILD_LIBBRIGDWARF=1 ${HSAILASM_SRC_DIR}
-  COMMAND make -j4 # not portable, but we need it this way
+  COMMAND ${CMAKE_COMMAND} -Wno-dev -G Ninja -DBUILD_LIBBRIGDWARF=1 ${HSAILASM_SRC_DIR}
+  COMMAND ninja
   WORKING_DIRECTORY ${HSAILASM_BIN_DIR}
   DEPENDS hlc
 )
