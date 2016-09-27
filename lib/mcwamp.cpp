@@ -30,6 +30,9 @@ const wchar_t accelerator::default_accelerator[] = L"default";
 extern "C" char * kernel_bundle_source[] asm ("_binary_kernel_bundle_start") __attribute__((weak));
 extern "C" char * kernel_bundle_end[] asm ("_binary_kernel_bundle_end") __attribute__((weak));
 
+extern "C" char * cuda_kernel_source[] asm ("_binary_kernel_cuda_start") __attribute__((weak));
+extern "C" char * cuda_kernel_end[] asm ("_binary_kernel_cuda_end") __attribute__((weak));
+
 // interface of HCC runtime implementation
 struct RuntimeImpl {
   RuntimeImpl(const char* libraryName) :
@@ -131,6 +134,13 @@ public:
   HSAPlatformDetect() : PlatformDetect("HSA", "libmcwamp_hsa.so",  kernel_bundle_source) {}
 };
 
+/**
+ * \brief CUDA runtime detection
+ */
+class CUDAPlatformDetect : public PlatformDetect {
+public:
+  CUDAPlatformDetect() : PlatformDetect("Cuda", "libmcwamp_cuda.so", cuda_kernel_source) {}
+};
 
 /**
  * \brief Flag to turn on/off platform-dependent runtime messages
@@ -167,10 +177,27 @@ static RuntimeImpl* LoadCPURuntime() {
   return runtimeImpl;
 }
 
+static RuntimeImpl* LoadCUDARuntime() {
+  RuntimeImpl* runtimeImpl = nullptr;
+  // load HCC CUDA runtime
+  if (mcwamp_verbose)
+    std::cout << "Use Cuda runtime" << std::endl;
+  runtimeImpl = new RuntimeImpl("libmcwamp_cuda.so");
+  if (!runtimeImpl->m_RuntimeHandle) {
+    std::cerr << "Can't load Cuda runtime!" << std::endl;
+    delete runtimeImpl;
+    exit(-1);
+  } else {
+    //std::cout << "Cuda C++AMP runtime loaded" << std::endl;
+  }
+  return runtimeImpl;
+}
+
 RuntimeImpl* GetOrInitRuntime() {
   static RuntimeImpl* runtimeImpl = nullptr;
   if (runtimeImpl == nullptr) {
     HSAPlatformDetect hsa_rt;
+    CUDAPlatformDetect cuda_rt;
 
     char* verbose_env = getenv("HCC_VERBOSE");
     if (verbose_env != nullptr) {
@@ -192,6 +219,12 @@ RuntimeImpl* GetOrInitRuntime() {
           // CPU runtime should be available
           runtimeImpl = LoadCPURuntime();
           runtimeImpl->set_cpu();
+      } else if(std::string("CUDA") == runtime_env) {
+        if (cuda_rt.detect()) {
+          runtimeImpl = LoadCUDARuntime();
+        } else {
+          std::cerr << "Ignore unsupported HCC_RUNTIME environment variable: " << runtime_env << std::endl;
+        }
       } else {
         std::cerr << "Ignore unknown HCC_RUNTIME environment variable:" << runtime_env << std::endl;
       }
@@ -201,6 +234,8 @@ RuntimeImpl* GetOrInitRuntime() {
     if (runtimeImpl == nullptr) {
       if (hsa_rt.detect()) {
         runtimeImpl = LoadHSARuntime();
+      } else if (cuda_rt.detect()) {
+        runtimeImpl = LoadCUDARuntime();
       } else {
           runtimeImpl = LoadCPURuntime();
           runtimeImpl->set_cpu();
@@ -266,6 +301,21 @@ static inline uint64_t Read8byteIntegerFromBuffer(const char *data, size_t pos) 
 #define HCC_TRIPLE_PREFIX_LENGTH (19)
 
 inline void DetermineAndGetProgram(KalmarQueue* pQueue, size_t* kernel_size, void** kernel_source) {
+
+  // For HCC CUDA runtime
+  static bool firstTime = false;
+  if (GetOrInitRuntime()->m_ImplName.find("libmcwamp_cuda") != std::string::npos) {
+    if (firstTime) {
+      if (mcwamp_verbose)
+        std::cout << "Use CUDA kernel\n";
+      firstTime = false;
+    }
+    *kernel_size =
+        (ptrdiff_t)((void *)cuda_kernel_end) -
+        (ptrdiff_t)((void *)cuda_kernel_source);
+      *kernel_source = cuda_kernel_source;
+    return;
+  }
 
   bool FoundCompatibleKernel = false;
 

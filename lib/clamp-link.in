@@ -23,6 +23,11 @@ CLANG_OFFLOAD_BUNDLER=$BINDIR/clang-offload-bundler
 VERBOSE=0
 
 ################
+
+# NVPTX target
+LOWER_CUDA=@HAS_CUDA@
+
+################
 # GPU targets
 # This array could be populated via 3 methods:
 # 1) clang driver adds multiple --amdgpu-target=<GPU target> options
@@ -444,6 +449,57 @@ fi
 # linker return value
 ret=0
 
+if [ $LOWER_CUDA == 1 ]; then
+  LIB=$BINDIR/../lib
+  MATHLIB=$BINDIR/../../lib
+  DIS=$BINDIR/llvm-dis
+  LLC=$BINDIR/llc
+
+  $LINK $LINK_KERNEL_ARGS | $OPT -always-inline - -o $TEMP_DIR/kernel.bc
+
+  # lower to GCN ISA
+  if [ $VERBOSE == 1 ]; then
+    echo "Generating CUDA kernel"
+  fi
+
+  if [ "$CLAMP_NOTILECHECK" == "ON" ]; then
+    $OPT -load $LIB/LLVMPromote@CMAKE_SHARED_LIBRARY_SUFFIX@ \
+         -load $LIB/LLVMEraseNonkernel@CMAKE_SHARED_LIBRARY_SUFFIX@ \
+         -strip-debug -promote-globals -erase-nonkernels -dce -globaldce < $TEMP_DIR/kernel.bc -o $TEMP_DIR/kernel.common.promote.bc
+  else
+    $OPT -load $LIB/LLVMPromote@CMAKE_SHARED_LIBRARY_SUFFIX@ \
+         -load $LIB/LLVMEraseNonkernel@CMAKE_SHARED_LIBRARY_SUFFIX@ \
+         -load $LIB/LLVMTileUniform@CMAKE_SHARED_LIBRARY_SUFFIX@ \
+         -strip-debug -promote-globals -erase-nonkernels -tile-uniform -dce -globaldce < $TEMP_DIR/kernel.bc -o $TEMP_DIR/kernel.common.promote.bc
+    fi
+
+  $OPT $TEMP_DIR/kernel.common.promote.bc -load $LIB/LLVMMarshallArgs@CMAKE_SHARED_LIBRARY_SUFFIX@ -marshall-args -dce -o $TEMP_DIR/kernel.promote.bc
+
+  if [ $? == 1 ]; then
+    echo "Generating CUDA kernel failed"
+    exit 1
+  fi
+
+  #TODO: link libdevice based on the arch, sm_20, sm_30, etc
+  $LINK $MATHLIB/cu_builtins.bc $TEMP_DIR/kernel.promote.bc /usr/local/cuda/nvvm/libdevice/libdevice.compute_20.10.bc -o $TEMP_DIR/kernel_fat.bc 2>>/dev/null
+  $OPT -nvvm-reflect-list=__CUDA_FTZ=0 -nvvm-reflect -O3 $TEMP_DIR/kernel_fat.bc -o $TEMP_DIR/kernel_fat.opt.bc
+  $LLC -mcpu=sm_20 -march=nvptx64 -mattr=ptx42 $TEMP_DIR/kernel_fat.opt.bc -o $TEMP_DIR/kernel.cuda
+
+  # remove temp file
+  rm $TEMP_DIR/kernel.common.promote.bc $TEMP_DIR/kernel.promote.bc $TEMP_DIR/kernel_fat.bc $TEMP_DIR/kernel_fat.opt.bc
+
+  # build a new kernel object
+  pushd . > /dev/null
+  cd $TEMP_DIR
+  $CLAMP_EMBED kernel.cuda kernel_cuda.o
+  popd > /dev/null
+
+  # link everything together
+  ld --allow-multiple-definition $TEMP_DIR/kernel_cuda.o $LINK_HOST_ARGS $LINK_CPU_ARG $LINK_OTHER_ARGS
+  ret=$?
+
+else # if [- $LOWER_CUDA == 1];
+
 # only do kernel lowering if there are objects given
 if [ -n "$LINK_KERNEL_ARGS" ]; then
 
@@ -502,6 +558,8 @@ if [ -n "$LINK_KERNEL_ARGS" ]; then
   ret=$?
 
 fi # if [ -n $LINK_KERNEL_ARGS ];
+
+fi # if [ $LOWER_CUDA == 1 ];
 
 # remove temp files
 if [ -e $TEMP_DIR/kernel_hsa.o ]; then

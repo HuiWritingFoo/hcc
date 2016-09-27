@@ -63,6 +63,21 @@ macro(add_mcwamp_library_hsa name )
 endmacro(add_mcwamp_library_hsa name )
 
 ####################
+# C++AMP runtime (CUDA implementation)
+####################
+macro(add_mcwamp_library_cuda name )
+  CMAKE_FORCE_CXX_COMPILER("${PROJECT_BINARY_DIR}/compiler/bin/clang++" MCWAMPCC)
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${CXXAMP_FLAGS} ${HCC_RUNTIME_CFLAGS}")
+  include_directories("${CUDA_HEADER}/..")
+  add_library( ${name} SHARED ${ARGN} )
+  amp_target(${name})
+  # LLVM and Clang shall be compiled beforehand
+  add_dependencies(${name} llvm-link opt clang)
+  # add CUDA libraries
+  target_link_libraries(${name} ${CUDA_LIBRARY})
+endmacro(add_mcwamp_library_cuda name )
+
+####################
 # C++AMP config (clamp-config)
 ####################
 

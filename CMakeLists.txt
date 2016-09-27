@@ -101,6 +101,32 @@ MESSAGE("ROCM_DEVICE_LIB_DIR = ${ROCM_DEVICE_LIB_DIR}, actually found at: ${ROCM
 MESSAGE("")
 
 #################
+# Detect CUDA
+#################
+find_path(CUDA_HEADER cuda.h PATHS ${CUDA_HEADER_DIR} /usr/local/cuda/include NO_DEFAULT_PATH)
+find_path(CUDA_HEADER cuda.h)
+if (NOT CUDA_HEADER)
+  MESSAGE("Cuda header not found. Use -DCUDA_HEADER_DIR=<path_to_cuda.h>.")
+endif(NOT CUDA_HEADER)
+find_library(CUDA_LIBRARY cuda PATHS ${CUDA_LIBRARY_DIR} /usr/lib/x86_64-linux-gnu /usr/local/cuda/lib64/stubs NO_DEFAULT_PATH)
+find_library(CUDA_LIBRARY cuda)
+if (NOT CUDA_LIBRARY)
+  MESSAGE("Cuda library not found. Use -DCUDA_LIBRARY_DIR=<path_to_libcuda.so>.")
+endif(NOT CUDA_LIBRARY)
+
+MESSAGE("")
+MESSAGE("CUDA INFORMATION:")
+MESSAGE("CUDA_HEADER_DIR = ${CUDA_HEADER_DIR}, actually found at: ${CUDA_HEADER}")
+MESSAGE("CUDA_LIBRARY_DIR = ${CUDA_LIBRARY_DIR}, actually found at: ${CUDA_LIBRARY}")
+MESSAGE("")
+
+if ((NOT CUDA_HEADER) OR (NOT CUDA_LIBRARY))
+  set(HAS_CUDA 0)
+else ((NOT CUDA_HEADER) OR (NOT CUDA_LIBRARY))
+  set(HAS_CUDA 1)
+endif ((NOT CUDA_HEADER) OR (NOT CUDA_LIBRARY))
+
+#################
 # Set up version information
 #################
 
@@ -156,13 +182,14 @@ else ((NOT HSA_HEADER) OR (NOT HSA_LIBRARY) OR (NOT ROCM_DEVICE_LIB))
   set(HAS_ROCM 1)
 endif ((NOT HSA_HEADER) OR (NOT HSA_LIBRARY) OR (NOT ROCM_DEVICE_LIB))
 
-if (HAS_ROCM EQUAL 0)
-  MESSAGE(FATAL_ERROR "ROCm is NOT available on the system!")
-endif (HAS_ROCM EQUAL 0)
+if (HAS_ROCM EQUAL 0 AND HAS_CUDA EQUAL 0)
+  MESSAGE(FATAL_ERROR "ROCm or Cuda is NOT available on the system!")
+endif (HAS_ROCM EQUAL 0 AND HAS_CUDA EQUAL 0)
 
 #################
 # Detect AMDGPU backend for native codegen
 #################
+if (HAS_ROCM EQUAL 1)
 
 set(HSA_AMDGPU_GPU_TARGET "AMD:AMDGPU:8:0:3" CACHE STRING "Target AMDGPU ISA version")
 
@@ -196,13 +223,18 @@ endforeach(AMDGPU_GPU_TARGET)
 string(REPLACE ";" " " AMDGPU_TARGET "${AMDGPU_TARGET_LIST}")
 MESSAGE(STATUS "HCC configured with AMDGPU targets: ${AMDGPU_TARGET}")
 
+endif (HAS_ROCM EQUAL 1)
+
 #################
 # Setup HCC backend macro string
 # Possible values:
 # - AMDGPU : for HSA systems configured with Lightning backend
 #################
-
-set(KALMAR_BACKEND "HCC_BACKEND_AMDGPU")
+if (HAS_CUDA EQUAL 1)
+  set(KALMAR_BACKEND "HCC_BACKEND_CUDA")
+else (HAS_CUDA EQUAL 1)
+  set(KALMAR_BACKEND "HCC_BACKEND_AMDGPU")
+endif (HAS_CUDA EQUAL 1)
 
 #########################
 # build target: world
@@ -212,6 +244,24 @@ set(KALMAR_BACKEND "HCC_BACKEND_AMDGPU")
 set(CLANG_SRC_DIR "${PROJECT_SOURCE_DIR}/compiler")
 set(CLANG_BIN_DIR "${PROJECT_BINARY_DIR}/compiler")
 file(MAKE_DIRECTORY ${CLANG_BIN_DIR})
+if (HAS_CUDA EQUAL 1)
+add_custom_target(clang
+  COMMAND ${CMAKE_COMMAND} ${CLANG_SRC_DIR}
+          -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+          -DKALMAR_VERSION_STRING=${KALMAR_VERSION_STRING}
+          -DKALMAR_VERSION_MAJOR=${KALMAR_VERSION_MAJOR}
+          -DKALMAR_VERSION_MINOR=${KALMAR_VERSION_MINOR}
+          -DKALMAR_VERSION_PATCH=${KALMAR_VERSION_PATCH}
+          -DKALMAR_SDK_COMMIT=${KALMAR_SDK_COMMIT}
+          -DKALMAR_FRONTEND_COMMIT=${KALMAR_FRONTEND_COMMIT}
+          -DKALMAR_BACKEND_COMMIT=${KALMAR_BACKEND_COMMIT}
+          -DKALMAR_BACKEND=${KALMAR_BACKEND}
+          -DLLVM_TARGETS_TO_BUILD="NVPTX\;X86"
+          -DLLVM_INCLUDE_EXAMPLES=off
+  COMMAND make -j ${NUM_BUILD_THREADS} # not portable, but we need it this way
+  WORKING_DIRECTORY ${CLANG_BIN_DIR}
+)
+else (HAS_CUDA EQUAL 1)
 add_custom_target(clang
   COMMAND ${CMAKE_COMMAND} ${CLANG_SRC_DIR}
           -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
@@ -228,6 +278,7 @@ add_custom_target(clang
   COMMAND make -j ${NUM_BUILD_THREADS} # not portable, but we need it this way
   WORKING_DIRECTORY ${CLANG_BIN_DIR}
 )
+endif (HAS_CUDA EQUAL 1)
 
 # create symlink of mostly used commands in clang to bin/
 # - hcc

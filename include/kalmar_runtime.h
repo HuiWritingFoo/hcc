@@ -189,6 +189,8 @@ public:
 
   virtual uint32_t GetGroupSegmentSize(void *kernel) { return 0; }
 
+  virtual void setCurrent() { } // Cuda Backend Specific
+
   KalmarDevice* getDev() { return pDev; }
   queuing_mode get_mode() const { return mode; }
   void set_mode(queuing_mode mod) { mode = mod; }

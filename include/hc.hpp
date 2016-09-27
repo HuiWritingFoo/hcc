@@ -2735,6 +2735,11 @@ inline int __shfl(int var, int srcLane, int width=__HSA_WAVEFRONT_SIZE__) __HC__
    };
 }
 
+#elif __hcc_backend__==HCC_BACKEND_CUDA
+
+inline int __shfl(int var, int srcLane, int width=__HSA_WAVEFRONT_SIZE__) __HC__ {
+  return 0;
+}
 #endif
 
 inline unsigned int __shfl(unsigned int var, int srcLane, int width=__HSA_WAVEFRONT_SIZE__) __HC__ {
@@ -2797,6 +2802,12 @@ inline int __shfl_up(int var, const unsigned int delta, const int width=__HSA_WA
         return __hsail_activelanepermute_b32(var, newSrcLane, var, newSrcLane < (laneId&(~(width-1))));
     }
 }
+#elif __hcc_backend__==HCC_BACKEND_CUDA
+
+inline int __shfl_up(int var, const unsigned int delta, const int width=__HSA_WAVEFRONT_SIZE__) __HC__ {
+  return 0;
+}
+
 #endif
 
 inline unsigned int __shfl_up(unsigned int var, const unsigned int delta, const int width=__HSA_WAVEFRONT_SIZE__) __HC__ {
@@ -2859,6 +2870,11 @@ inline int __shfl_down(int var, const unsigned int delta, const int width=__HSA_
         return __hsail_activelanepermute_b32(var, newSrcLane, var, newSrcLane >= ((laneId&(~(width-1))) + width ));
     }
 }
+#elif __hcc_backend__==HCC_BACKEND_CUDA
+
+inline int __shfl_down(int var, const unsigned int delta, const int width=__HSA_WAVEFRONT_SIZE__) __HC__ {
+  return 0;
+}
 
 #endif
 
@@ -2915,6 +2931,11 @@ inline int __shfl_xor(int var, int laneMask, int width=__HSA_WAVEFRONT_SIZE__) _
     int index = self^laneMask;
     index = index >= ((self+width)&~(width-1))?self:index;
     return __hsail_activelanepermute_b32(var, index, 0, 0);
+}
+#elif __hcc_backend__==HCC_BACKEND_CUDA
+
+inline int __shfl_xor(int var, int laneMask, int width=__HSA_WAVEFRONT_SIZE__) __HC__ {
+  return 0;
 }
 
 #endif

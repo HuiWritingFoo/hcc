@@ -44,7 +44,14 @@ install(PROGRAMS ${PROJECT_BINARY_DIR}/bin/extractkernel
     DESTINATION bin)
 
 ####################
+# C++AMP tools (Cuda-specific)
+####################
+install(FILES cuda/cu_builtins.bc DESTINATION lib)
+file(COPY cuda/cu_builtins.bc DESTINATION "${PROJECT_BINARY_DIR}/lib")
+
+####################
 # add subdirectories
 ####################
 add_subdirectory(hsa)
 add_subdirectory(cpu)
+add_subdirectory(cuda)
