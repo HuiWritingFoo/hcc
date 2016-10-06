@@ -317,20 +317,7 @@ public:
 #endif
 
     if (getDev()->is_unified()) {
-      if(blocking) {
-        CheckCudaError(cuMemcpyAsync(dstdm + dst_offset, srcdm + src_offset, count, hStream));
-        CheckCudaError(cuStreamSynchronize(hStream));
-      } else {
-        std::shared_ptr<CudaCommonAsyncOp> op = std::make_shared<CudaCommonAsyncOp>();
-        CheckCudaError(cuMemcpyAsync(dstdm + dst_offset, srcdm + src_offset, count, hStream));
-        op->enqueueAsync(this);
-        // Update dependencies
-        asyncOps.push_back(op);
-        //bufferKernelMap[src].clear();
-        bufferKernelMap[src].push_back(op);
-        //bufferKernelMap[dst].clear();
-        bufferKernelMap[dst].push_back(op);
-      }
+      std::memmove((char*)dst + dst_offset, (char*)src + src_offset, count);
     } else {
 
       if (blocking) {
