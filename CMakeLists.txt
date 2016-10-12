@@ -30,7 +30,7 @@ ENDIF(NOT NUM_BUILD_THREADS)
 
 include (MCWAMP)
 
-#execute_process(COMMAND ln -sf ../../lld WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/compiler/tools)
+execute_process(COMMAND ln -sf ../../lld WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/compiler/tools)
 execute_process(COMMAND ln -sf ../../clang WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/compiler/tools)
 
 # Regression test
@@ -125,6 +125,10 @@ if ((NOT CUDA_HEADER) OR (NOT CUDA_LIBRARY))
 else ((NOT CUDA_HEADER) OR (NOT CUDA_LIBRARY))
   set(HAS_CUDA 1)
 endif ((NOT CUDA_HEADER) OR (NOT CUDA_LIBRARY))
+
+if (HAS_CUDA EQUAL 1)
+  execute_process(COMMAND rm -f ${CMAKE_CURRENT_SOURCE_DIR}/compiler/tools/lld)
+endif (HAS_CUDA EQUAL 1)
 
 #################
 # Set up version information
