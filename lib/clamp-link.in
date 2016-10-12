@@ -457,46 +457,111 @@ if [ $LOWER_CUDA == 1 ]; then
 
   $LINK $LINK_KERNEL_ARGS | $OPT -always-inline - -o $TEMP_DIR/kernel.bc
 
-  # lower to GCN ISA
+  # lower to CUDA ISA
   if [ $VERBOSE == 1 ]; then
     echo "Generating CUDA kernel"
   fi
 
+  CUDA_GPU_ARCH=@CUDA_TARGET_GPU_ARCH@
+
+  CUDA_LIBDEVICE_PATH="/usr/local/cuda/nvvm/libdevice/libdevice."$CUDA_GPU_ARCH".10.bc"
+  CUDA_GPU_CODE=""
+  PTX_VERSION="ptx42"
+
+  if [ "$CUDA_GPU_ARCH" == "compute_20" ]; then
+    CUDA_GPU_CODE="sm_20"
+  elif [ "$CUDA_GPU_ARCH" == "compute_30" ]; then
+    CUDA_GPU_CODE="sm_30"
+  elif [ "$CUDA_GPU_ARCH" == "compute_35" ]; then
+    CUDA_GPU_CODE="sm_35"
+  elif [ "$CUDA_GPU_ARCH" == "compute_50" ]; then
+    CUDA_GPU_CODE="sm_50"
+  else
+    echo "Unsupported CUDA GPU Arch: $CUDA_GPU_ARCH"
+    exit 1
+  fi
+
+  TARGET_CO=kernel-$CUDA_GPU_ARCH.ptx
+
   if [ "$CLAMP_NOTILECHECK" == "ON" ]; then
     $OPT -load $LIB/LLVMPromote@CMAKE_SHARED_LIBRARY_SUFFIX@ \
          -load $LIB/LLVMEraseNonkernel@CMAKE_SHARED_LIBRARY_SUFFIX@ \
-         -strip-debug -promote-globals -erase-nonkernels -dce -globaldce < $TEMP_DIR/kernel.bc -o $TEMP_DIR/kernel.common.promote.bc
+         -strip-debug -promote-globals -erase-nonkernels -dce -globaldce < $TEMP_DIR/kernel.bc -o $TEMP_DIR/$TARGET_CO.common.promote.bc
   else
     $OPT -load $LIB/LLVMPromote@CMAKE_SHARED_LIBRARY_SUFFIX@ \
          -load $LIB/LLVMEraseNonkernel@CMAKE_SHARED_LIBRARY_SUFFIX@ \
          -load $LIB/LLVMTileUniform@CMAKE_SHARED_LIBRARY_SUFFIX@ \
-         -strip-debug -promote-globals -erase-nonkernels -tile-uniform -dce -globaldce < $TEMP_DIR/kernel.bc -o $TEMP_DIR/kernel.common.promote.bc
+         -strip-debug -promote-globals -erase-nonkernels -tile-uniform -dce -globaldce < $TEMP_DIR/kernel.bc -o $TEMP_DIR/$TARGET_CO.common.promote.bc
     fi
 
-  $OPT $TEMP_DIR/kernel.common.promote.bc -load $LIB/LLVMMarshallArgs@CMAKE_SHARED_LIBRARY_SUFFIX@ -marshall-args -dce -o $TEMP_DIR/kernel.promote.bc
+  $OPT $TEMP_DIR/$TARGET_CO.common.promote.bc -load $LIB/LLVMMarshallArgs@CMAKE_SHARED_LIBRARY_SUFFIX@ -marshall-args -dce -o $TEMP_DIR/$TARGET_CO.promote.bc
 
   if [ $? == 1 ]; then
     echo "Generating CUDA kernel failed"
     exit 1
   fi
 
-  #TODO: link libdevice based on the arch, sm_20, sm_30, etc
-  $LINK $MATHLIB/cu_builtins.bc $TEMP_DIR/kernel.promote.bc /usr/local/cuda/nvvm/libdevice/libdevice.compute_20.10.bc -o $TEMP_DIR/kernel_fat.bc 2>>/dev/null
-  $OPT -nvvm-reflect-list=__CUDA_FTZ=0 -nvvm-reflect -O3 $TEMP_DIR/kernel_fat.bc -o $TEMP_DIR/kernel_fat.opt.bc
-  $LLC -mcpu=sm_20 -march=nvptx64 -mattr=ptx42 $TEMP_DIR/kernel_fat.opt.bc -o $TEMP_DIR/kernel.cuda
+  $LINK $MATHLIB/cu_builtins.bc $TEMP_DIR/$TARGET_CO.promote.bc $CUDA_LIBDEVICE_PATH -o $TEMP_DIR/$TARGET_CO.fat.bc 2>>/dev/null
+  $OPT -nvvm-reflect-list=__CUDA_FTZ=0 -nvvm-reflect -O3 $TEMP_DIR/$TARGET_CO.fat.bc -o $TEMP_DIR/$TARGET_CO.fat.opt.bc
+  $LLC -mcpu=$CUDA_GPU_CODE -march=nvptx64 -mattr=$PTX_VERSION $TEMP_DIR/$TARGET_CO.fat.opt.bc -o $TEMP_DIR/$TARGET_CO
 
   # remove temp file
-  rm $TEMP_DIR/kernel.common.promote.bc $TEMP_DIR/kernel.promote.bc $TEMP_DIR/kernel_fat.bc $TEMP_DIR/kernel_fat.opt.bc
+  if [ -e $TEMP_DIR/$TARGET_CO.common.promote.bc ]; then
+    rm $TEMP_DIR/$TARGET_CO.common.promote.bc
+  fi
+
+  if [ -e $TEMP_DIR/$TARGET_CO.promote.bc ]; then
+    rm $TEMP_DIR/$TARGET_CO.promote.bc
+  fi
+
+  if [ -e $TEMP_DIR/$TARGET_CO.fat.bc ]; then
+    rm $TEMP_DIR/$TARGET_CO.fat.bc
+  fi
+
+  if [ -e $TEMP_DIR/$TARGET_CO.fat.opt.bc ]; then
+    rm $TEMP_DIR/$TARGET_CO.fat.opt.bc
+  fi
+
+  # touch an empty object for host part, to accomodate rule required by
+  # clang-offload-bundler
+  touch $TEMP_DIR/__empty.o
+
+  # invoke clang-offload-bundler to create kernel bundle
+  CLANG_OFFLOAD_BUNDLER_INPUTS_ARGS="-inputs=$TEMP_DIR/__empty.o"
+  CLANG_OFFLOAD_BUNDLER_TARGETS_ARGS="-targets=host-x86_64-unknown-linux"
+
+  # augment arguments to clang-offload-bundler
+  CLANG_OFFLOAD_BUNDLER_INPUTS_ARGS+=",$TEMP_DIR/$TARGET_CO"
+  CLANG_OFFLOAD_BUNDLER_TARGETS_ARGS+=",hcc-nvptx64--cuda-$CUDA_GPU_ARCH"
+
+  # invoke clang-offload-bundler
+  $CLANG_OFFLOAD_BUNDLER -type=o $CLANG_OFFLOAD_BUNDLER_INPUTS_ARGS $CLANG_OFFLOAD_BUNDLER_TARGETS_ARGS -outputs=$TEMP_DIR/kernel.bundle
+
+  # error handling
+  ret=$?
+  if [ $ret != 0 ]; then
+    exit $ret
+  fi
+
+  if [ $KMDUMPBUNDLE == "1" ]; then
+    cp $TEMP_DIR/kernel.bundle ./dump.bundle
+  fi
 
   # build a new kernel object
   pushd . > /dev/null
   cd $TEMP_DIR
-  $CLAMP_EMBED kernel.cuda kernel_cuda.o
+  $CLAMP_EMBED kernel.bundle kernel_cuda.o
   popd > /dev/null
 
   # link everything together
   ld --allow-multiple-definition $TEMP_DIR/kernel_cuda.o $LINK_HOST_ARGS $LINK_CPU_ARG $LINK_OTHER_ARGS
   ret=$?
+
+  if [ -e $TEMP_DIR/kernel_cuda.o ]; then
+    rm $TEMP_DIR/kernel_cuda.o
+  fi
+
+  rm -f $TEMP_DIR/kernel-*.ptx
 
 else # if [- $LOWER_CUDA == 1];
 

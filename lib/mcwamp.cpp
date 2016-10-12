@@ -30,9 +30,6 @@ const wchar_t accelerator::default_accelerator[] = L"default";
 extern "C" char * kernel_bundle_source[] asm ("_binary_kernel_bundle_start") __attribute__((weak));
 extern "C" char * kernel_bundle_end[] asm ("_binary_kernel_bundle_end") __attribute__((weak));
 
-extern "C" char * cuda_kernel_source[] asm ("_binary_kernel_cuda_start") __attribute__((weak));
-extern "C" char * cuda_kernel_end[] asm ("_binary_kernel_cuda_end") __attribute__((weak));
-
 // interface of HCC runtime implementation
 struct RuntimeImpl {
   RuntimeImpl(const char* libraryName) :
@@ -139,7 +136,7 @@ public:
  */
 class CUDAPlatformDetect : public PlatformDetect {
 public:
-  CUDAPlatformDetect() : PlatformDetect("Cuda", "libmcwamp_cuda.so", cuda_kernel_source) {}
+  CUDAPlatformDetect() : PlatformDetect("Cuda", "libmcwamp_cuda.so", kernel_bundle_source) {}
 };
 
 /**
@@ -181,10 +178,10 @@ static RuntimeImpl* LoadCUDARuntime() {
   RuntimeImpl* runtimeImpl = nullptr;
   // load HCC CUDA runtime
   if (mcwamp_verbose)
-    std::cout << "Use Cuda runtime" << std::endl;
+    std::cout << "Use CUDA runtime" << std::endl;
   runtimeImpl = new RuntimeImpl("libmcwamp_cuda.so");
   if (!runtimeImpl->m_RuntimeHandle) {
-    std::cerr << "Can't load Cuda runtime!" << std::endl;
+    std::cerr << "Can't load CUDA runtime!" << std::endl;
     delete runtimeImpl;
     exit(-1);
   } else {
@@ -302,21 +299,6 @@ static inline uint64_t Read8byteIntegerFromBuffer(const char *data, size_t pos) 
 
 inline void DetermineAndGetProgram(KalmarQueue* pQueue, size_t* kernel_size, void** kernel_source) {
 
-  // For HCC CUDA runtime
-  static bool firstTime = false;
-  if (GetOrInitRuntime()->m_ImplName.find("libmcwamp_cuda") != std::string::npos) {
-    if (firstTime) {
-      if (mcwamp_verbose)
-        std::cout << "Use CUDA kernel\n";
-      firstTime = false;
-    }
-    *kernel_size =
-        (ptrdiff_t)((void *)cuda_kernel_end) -
-        (ptrdiff_t)((void *)cuda_kernel_source);
-      *kernel_source = cuda_kernel_source;
-    return;
-  }
-
   bool FoundCompatibleKernel = false;
 
   // walk through bundle header
@@ -387,6 +369,15 @@ inline void DetermineAndGetProgram(KalmarQueue* pQueue, size_t* kernel_size, voi
         break;
       }
     }
+
+    // For HCC CUDA runtime
+    if (Triple.compare(0, strlen("hcc-nvptx64--cuda-"), "hcc-nvptx64--cuda-") == 0) {
+      *kernel_size = (size_t)Size;
+      *kernel_source = (unsigned char*)data + Offset;
+      FoundCompatibleKernel = true;
+      break;
+    }
+
   }
 
   if (!FoundCompatibleKernel) {
