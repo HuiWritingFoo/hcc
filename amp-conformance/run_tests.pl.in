@@ -56,12 +56,12 @@ if (!$tests_root) {
 $tests_root = abs_path($tests_root);
 chdir($tests_root);
 
-my $CLANG_AMP_HOME="@PROJECT_SOURCE_DIR@";
-my $CLANG_AMP_BUILD_DIR="@PROJECT_BINARY_DIR@";
+my $CLANG_AMP_HOME='@PROJECT_SOURCE_DIR@';
+my $CLANG_AMP_BUILD_DIR='@PROJECT_BINARY_DIR@';
 
-my $AMPTESTLIB="@AMPTESTLIB@";
-my $AMPTESTINC="@AMPTESTINC@";
-my $RUNTESTSDIR="@RUNTESTSDIR@";
+my $AMPTESTLIB='@AMPTESTLIB@';
+my $AMPTESTINC='@AMPTESTINC@';
+my $RUNTESTSDIR='@RUNTESTSDIR@';
 
 
 my $CLANG_AMP="$CLANG_AMP_BUILD_DIR/compiler/bin/clang++";
@@ -74,7 +74,7 @@ $CLAMP_CXXFLAGS =~ s/\s+$//;
 my $CLAMP_LDFLAGS=`$CLAMP_CONFIG --build --ldflags`;
 $CLAMP_LDFLAGS =~ s/^\s+//;
 $CLAMP_LDFLAGS =~ s/\s+$//;
-my $SHARED_CXXFLAGS="$CLAMP_CXXFLAGS -I$AMPTESTINC -I/usr/include -I$CLANG_AMP_BUILD_DIR/compiler/lib/clang/3.5.0/include/";
+my $SHARED_CXXFLAGS="$CLAMP_CXXFLAGS -I$AMPTESTINC -I/usr/include -I$CLANG_AMP_BUILD_DIR/compiler/lib/clang/4.0.0/include/";
 
 ### Prepare environment
 if(-e $run_log)
@@ -206,10 +206,10 @@ sub run_test {
                 $CLANG_AMP -fcxx-exceptions -fsyntax-only -D__CPU__=1 $SHARED_CXXFLAGS $include_main $test $cflags_defs 2>&1";
        } elsif ($ENV{TEST_CPU} eq "ON") {
            $command = "\\
-           $CLANG_AMP -std=c++amp -cpu $SHARED_CXXFLAGS $include_main $test $AMPTESTLIB $cflags_defs $CLAMP_LDFLAGS -o $test_exec -g 2>&1";
+           $CLANG_AMP -std=c++amp -cpu $SHARED_CXXFLAGS $include_main $test $AMPTESTLIB $cflags_defs $CLAMP_LDFLAGS -o $test_exec 2>&1";
         } else {
             $command = "\\
-                $CLANG_AMP $SHARED_CXXFLAGS $include_main $test $AMPTESTLIB $cflags_defs $CLAMP_LDFLAGS -o $test_exec -g 2>&1";
+                $CLANG_AMP $SHARED_CXXFLAGS $include_main $test $AMPTESTLIB $cflags_defs $CLAMP_LDFLAGS -o $test_exec 2>&1";
         }
 
         log_message("Command: $command\n"

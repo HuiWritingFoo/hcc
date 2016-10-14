@@ -24,10 +24,6 @@ configure_file(
   ${CMAKE_CURRENT_BINARY_DIR}/../lib/clamp-config.hxx ESCAPE_QUOTES)
 
 configure_file(
-  ${CMAKE_CURRENT_SOURCE_DIR}/../lib/clamp-spirify.in
-  ${CMAKE_CURRENT_BINARY_DIR}/../compiler/bin/clamp-spirify @ONLY)
-
-configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/../lib/clamp-device.in
   ${CMAKE_CURRENT_BINARY_DIR}/../compiler/bin/clamp-device @ONLY)
 
@@ -60,9 +56,12 @@ if(POLICY CMP0037)
   cmake_policy(SET CMP0037 OLD)
 endif()
 
+include(ProcessorCount)
+ProcessorCount(N)
+
 add_custom_target(test
-  COMMAND python ${LLVM_ROOT}/bin/llvm-lit -j 8 --path ${LLVM_TOOLS_DIR} -sv ${CMAKE_CURRENT_BINARY_DIR}
-  # DEPENDS ${HCC_GTEST_LIB}
+  COMMAND python ${LLVM_ROOT}/bin/llvm-lit -j ${N} --path ${LLVM_TOOLS_DIR} -sv ${CMAKE_CURRENT_BINARY_DIR}
+  # DEPENDS ${CPPAMP_GTEST_LIB}
   COMMENT "Running HCC regression tests")
 
 if(POLICY CMP0037)

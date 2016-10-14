@@ -44,6 +44,23 @@ git locations of repositories used in the merge process are:
   - URL: git@github.com:llvm-mirror/clang.git
   - branch : master
 
+Set SSH URL for git push
+------------------------------------
+ToT HCC has been configured to use HTTPS URL by default. It is easy for users
+to clone it anonymously. But it would be hard for committing changes. Use the
+following commands to setup SSH URL.
+
+- change to ToT HCC directory
+- `git remote set-url --push origin git@github.com:RadeonOpenCompute/hcc.git`
+- `cd clang`
+- `git remote set-url --push origin git@github.com:RadeonOpenCompute/hcc-clang-upgrade.git`
+- `cd ../compiler`
+- `git remote set-url --push origin git@github.com:RadeonOpenCompute/llvm.git`
+- `cd ../lld`
+- `git remote set-url --push origin git@github.com:RadeonOpenCompute/lld.git`
+
+This only needs to be done once.
+
 Step-by-step Merge Process
 ------------------------------------
 ### Merge amd-common LLVM commits
@@ -52,15 +69,18 @@ Step-by-step Merge Process
 - `cd compiler`
 - `git checkout amd-hcc`
 - `git pull`
-- `git merge origin/amd-common`
+- `git merge origin/amd-common --no-edit`
 
 Resolve any merge conflicts encountered here. Commit to amd-hcc branch.
 
 ### Merge amd-common LLD commits
 
 - `cd ../lld`
-- `git checkout amd-common`
+- `git checkout amd-hcc`
 - `git pull`
+- `git merge origin/amd-common --no-edit`
+
+Resolve any merge conflicts encountered here. Commit to amd-hcc branch.
 
 ### Add git remote for upstream Clang
 
@@ -68,7 +88,7 @@ Resolve any merge conflicts encountered here. Commit to amd-hcc branch.
 - `git remote -v` to check if there is a git remote pointing to:
   `git@github.com:llvm-mirror/clang.git`
 - If there is not, add it by:
-  `git remote add clang git@github.com:llvm-mirror/clang.git`
+  `git remote add clang https://github.com/llvm-mirror/clang`
 
 ### Fetch upstream Clang commits
 
@@ -76,13 +96,13 @@ Resolve any merge conflicts encountered here. Commit to amd-hcc branch.
   - change to the branch to keep upstream commits.
   - The branch contains no HCC-specific codes.
 - `git fetch clang`
-- `git merge --no-ff clang/master`
+- `git merge --no-ff clang/master --no-edit`
 
 ### Merge upstream Clang with ToT HCC Clang
 
 - `git checkout clang_tot_upgrade`
   - change to the main develop branch for ToT HCC Clang
-- `git merge upstream`
+- `git merge upstream --no-edit`
 
 Resolve merge conflicts encountered here. Commit to clang_tot_upgrade branch.
 
@@ -104,14 +124,21 @@ checkout is at `~/hcc_upstream`.
 Test with one C++AMP FP math unit test.
 ```
 bin/hcc `bin/clamp-config --build --cxxflags --ldflags` -lm \
-  ~/hcc/hcc_upstream/tests/Unit/AmpMath/amp_math_cos.cpp
+  ~/hcc/hcc_tot/tests/Unit/AmpMath/amp_math_cos.cpp
 ./a.out ; echo $?
 ```
 
 Test with one grid_launch unit test with AM library usage.
 ```
 bin/hcc `bin/hcc-config --build --cxxflags --ldflags` -lhc_am \
-  ~/hcc/hcc_upstream/tests/Unit/GridLaunch/glp_const.cpp
+  ~/hcc/hcc_tot/tests/Unit/GridLaunch/glp_const.cpp
+./a.out ; echo $?
+```
+
+Test with one HC unit test with atomic function and 64-bit arithmetic.
+```
+bin/hcc `bin/hcc-config --build --cxxflags --ldflags` \
+  ~/hcc/hcc_tot/tests/Unit/HC/hc_atomic_add_global.cpp
 ./a.out ; echo $?
 ```
 
@@ -127,14 +154,20 @@ bin/hcc `bin/hcc-config --build --cxxflags --ldflags` -lhc_am \
 Following steps are to ensure "develop" and "master" branch are kept the same
 as "clang_tot_upgrade" branch.
 - `git checkout develop`
-- `git merge clang_tot_upgrade`
+- `git merge clang_tot_upgrade --no-edit`
 - `git push`
 - `git checkout master`
-- `git merge clang_tot_upgrade`
+- `git merge clang_tot_upgrade --no-edit`
 - `git push`
 
 Finally switch back to "clang_tot_upgrade" branch.
 - `git checkout clang_tot_upgrade`
+
+### Push amd-hcc LLD submodule
+
+- `cd ../lld`
+- `git checkout amd-hcc`
+- `git push`
 
 ### Push amd-hcc LLVM submodule
 
@@ -146,7 +179,8 @@ Finally switch back to "clang_tot_upgrade" branch.
 
 - `cd ..`
 - `git add clang compiler lld`
-- `git commit` and provide commit log
+- `git commit -m "[Config] revise submodule configuration"`, or provide custom
+  commit log
 - `git push` to push submodules configuration online
 
 Upon reaching here, the merge process is completed.

@@ -13,7 +13,7 @@ The project now employs git submodules to manage external components it depends 
 For example:
 ```
 # automatically fetches all submodules
-git clone --recursive -b clang_tot_upgrade git@github.com:RadeonOpenCompute/hcc.git
+git clone --recursive -b clang_tot_upgrade https://github.com/RadeonOpenCompute/hcc.git
 ```
 
 For more information about git submodules, please refer to [git documentation][2].
@@ -29,7 +29,9 @@ When compiling device code with hcc, rocm-device-libs package needs to be
 installed.
 
 In case rocm-device-libs package is not present, you are required to build it
-from source. Once it's built, run `make install` and config ToT HCC like:
+from source. Please refer to [ROCm-Device-Libs build procedure](https://github.com/RadeonOpenCompute/ROCm-Device-Libs#building) for more details.
+
+Once it's built, run `make install` and config ToT HCC like:
 
 ```
 cmake \

@@ -170,11 +170,11 @@ bool test() restrict(cpu,amp)
 	a7l = a7r;
 
 	A8 a8l;
-	const A8 a8r;
+	const A8 a8r = {};
 	a8l = a8r;
 
 	A9 a9l;
-	const A9 a9r;
+	const A9 a9r = {};
 	a9l = a9r;
 
 	A11 a11l, a11r;
@@ -190,7 +190,7 @@ bool test_cpu() restrict(cpu)
 	a6l = a6r;
 
 	A10 a10l;
-	const A10 a10r;
+	const A10 a10r = {};
 	a10l = a10r;
 	
 	return true; // Compile-time tests

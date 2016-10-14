@@ -39,6 +39,8 @@
  */
 namespace hc {
 
+class AmPointerInfo;
+
 using namespace Kalmar::enums;
 using namespace Kalmar::CLAMP;
 
@@ -268,13 +270,29 @@ public:
     /**
      * Copies size_bytes bytes from src to dst.  
      * Src and dst must not overlap.  
-     * Note the src is the first parameter and dst is second, foAllowing C++ convention.
+     * Note the src is the first parameter and dst is second, following C++ convention.
      * The copy command will execute after any commands already inserted into the accelerator_view finish.
      * This is a synchronous copy command, and the copy operation complete before this call returns.
      */
     void copy(const void *src, void *dst, size_t size_bytes) {
         pQueue->copy(src, dst, size_bytes);
     }
+
+
+    /**
+     * Copies size_bytes bytes from src to dst.  
+     * Src and dst must not overlap.  
+     * Note the src is the first parameter and dst is second, following C++ convention.
+     * The copy command will execute after any commands already inserted into the accelerator_view finish.
+     * This is a synchronous copy command, and the copy operation complete before this call returns.
+     * The copy_ext flavor allows caller to provide additional information about each pointer, which can improve performance by eliminating replicated lookups.
+    
+     @p copyDir : Specify direction of copy.  Must be hcMemcpyHostToHost, hcMemcpyHostToDevice, hcMemcpyDeviceToHost, or hcMemcpyDeviceToDevice. 
+     @p forceHostCopyEngine : Force copy to be performed with host involvement rather than with accelerator copy engines.
+     */
+    void copy_ext(const void *src, void *dst, size_t size_bytes, hcCommandKind copyDir, const hc::AmPointerInfo &srcInfo, const hc::AmPointerInfo &dstInfo, bool forceHostCopyEngine) {
+        pQueue->copy_ext(src, dst, size_bytes, copyDir, srcInfo, dstInfo, forceHostCopyEngine);
+    };
 
     /**
      * Copies size_bytes bytes from src to dst.  
@@ -1146,6 +1164,12 @@ public:
         __asyncOp = nullptr;
       }
     }
+
+
+    /**
+     * @return reference count for the completion future.  Primarily used for debug purposes.
+     */
+    int get_use_count() const { return __asyncOp.use_count(); };
 
 private:
     std::shared_future<void> __amp_future;
@@ -2480,13 +2504,6 @@ extern "C" inline unsigned int __activelanecount_u32_b1(unsigned int input) __HC
  return  __popcount_u32_b64(__activelanemask_v4_b64_b1(input));
 }
 
-/**
- * Permute active work-items in the wavefront.
- *
- * Please refer to: <a href="http://www.hsafoundation.com/html/Content/PRM/Topics/09_Parallel/cross_lane.htm">HSA PRM</a> for more detailed information of this instruction.
- */
-extern "C" unsigned int __activelanepermute_b32(unsigned int src, unsigned int laneId, unsigned int identity, unsigned int useIdentity) __HC__;
-
 // ------------------------------------------------------------------------
 // Wavefront Vote Functions
 // ------------------------------------------------------------------------
@@ -2550,6 +2567,23 @@ union __u {
  * __HSA_WAVEFRONT_SIZE__.
  */
 
+#if __hcc_backend__==HCC_BACKEND_AMDGPU
+
+/*
+ * FIXME: We need to add __builtin_amdgcn_mbcnt_{lo,hi} to clang and call
+ * them here instead.
+ */
+
+int __amdgcn_mbcnt_lo(int mask, int src) [[hc]] __asm("llvm.amdgcn.mbcnt.lo");
+int __amdgcn_mbcnt_hi(int mask, int src) [[hc]] __asm("llvm.amdgcn.mbcnt.hi");
+
+inline int __lane_id(void) [[hc]] {
+  int lo = __amdgcn_mbcnt_lo(-1, 0);
+  return __amdgcn_mbcnt_hi(-1, lo);
+}
+
+#elif __hcc_backend__==HCC_BACKEND_HSAIL
+
 extern "C" __attribute__((const)) unsigned int __hsail_get_lane_id(void) __HC__;
 
 // returns the lane ID within a wavefront
@@ -2557,12 +2591,16 @@ inline int __lane_id(void) [[hc]] {
   return __hsail_get_lane_id();
 }
 
+#endif
+
 #if __hcc_backend__==HCC_BACKEND_AMDGPU
 
 /**
  * ds_bpermute intrinsic
+ * FIXME: We need to add __builtin_amdgcn_ds_bpermute to clang and call it here
+ * instead.
  */
-extern "C" int __amdgcn_ds_bpermute(int index, int src) [[hc]];
+int __amdgcn_ds_bpermute(int index, int src) [[hc]] __asm("llvm.amdgcn.ds.bpermute");
 inline unsigned int __amdgcn_ds_bpermute(int index, unsigned int src) [[hc]] {
   __u tmp; tmp.u = src;
   tmp.i = __amdgcn_ds_bpermute(index, tmp.i);
@@ -2691,17 +2729,6 @@ inline float __amdgcn_wave_rl1(float src) [[hc]] {
   return tmp.f;
 }
 
-#elif __hcc_backend__==HCC_BACKEND_HSAIL
-
-extern "C" unsigned int __hsail_activelanepermute_b32(unsigned int src, unsigned int lid, unsigned int ival, bool useival) __HC__;
-inline int __wavefront_shift_right(int var) __HC__ {
-    return  __hsail_activelanepermute_b32(var, __lane_id()-1
-                                        , var, __lane_id()==0);
-}
-inline int __wavefront_shift_left(int var) __HC__ {
-    return  __hsail_activelanepermute_b32(var, __lane_id()+1
-                                        , var, __lane_id()==63);
-}
 #endif
 
 /* definition to expand macro then apply to pragma message 
