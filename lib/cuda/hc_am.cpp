@@ -1,7 +1,7 @@
 #include "hc_am.hpp"
 #include <cuda.h>
 
-#define ENABLE_TRACKER 0
+#define ENABLE_TRACKER 1
 
 #define DB_TRACKER 0
 
@@ -195,9 +195,11 @@ auto_voidp am_alloc(size_t sizeBytes, hc::accelerator &acc, unsigned flags)
       kq->setCurrent();
       if (flags & amHostPinned) {
         CheckCudaError(cuMemAllocHost(&ptr, sizeBytes));
+        CUdeviceptr* pdptr;
+        CheckCudaError(cuMemHostGetDevicePointer(pdptr, ptr, 0/*Must be 0*/));
 #if ENABLE_TRACKER
          g_amPointerTracker.insert(ptr,
-           hc::AmPointerInfo(ptr/*hostPointer*/, ptr /*devicePointer*/, sizeBytes, acc, false/*isDevice*/, true /*isAMManaged*/));
+           hc::AmPointerInfo(ptr/*hostPointer*/, pdptr /*devicePointer*/, sizeBytes, acc, false/*isDevice*/, true /*isAMManaged*/));
 #endif
       } else {
         CUdeviceptr dm;
@@ -206,7 +208,7 @@ auto_voidp am_alloc(size_t sizeBytes, hc::accelerator &acc, unsigned flags)
         // track device pointer
 #if ENABLE_TRACKER
          g_amPointerTracker.insert(ptr,
-           hc::AmPointerInfo(ptr/*hostPointer*/, ptr /*devicePointer*/, sizeBytes, acc, true/*isDevice*/, true /*isAMManaged*/));
+           hc::AmPointerInfo(NULL/*hostPointer*/, ptr /*devicePointer*/, sizeBytes, acc, true/*isDevice*/, true /*isAMManaged*/));
 #endif
      }
     }
