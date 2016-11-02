@@ -25,9 +25,9 @@ struct AmPointerInfo {
 
     int         _appId;              ///< App-specific storage.  (Used by HIP to store deviceID.)
     unsigned    _appAllocationFlags; ///< App-specific allocation flags.  (Used by HIP to store allocation flags.)
+    Kalmar::KalmarQueue* _queue;
 
-
-    AmPointerInfo(void *hostPointer, void *devicePointer, size_t sizeBytes, hc::accelerator &acc,  bool isInDeviceMem=false, bool isAmManaged=false) :
+    AmPointerInfo(void *hostPointer, void *devicePointer, size_t sizeBytes, hc::accelerator &acc,  bool isInDeviceMem=false, bool isAmManaged=false, Kalmar::KalmarQueue* q = nullptr) :
         _hostPointer(hostPointer),
         _devicePointer(devicePointer),
         _sizeBytes(sizeBytes),
@@ -35,7 +35,8 @@ struct AmPointerInfo {
         _isInDeviceMem(isInDeviceMem),
         _isAmManaged(isAmManaged),
         _appId(-1),
-        _appAllocationFlags(0)  {};
+        _appAllocationFlags(0),
+        _queue(q)  {};
 
     AmPointerInfo & operator= (const AmPointerInfo &other);
 

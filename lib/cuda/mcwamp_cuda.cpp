@@ -18,18 +18,40 @@
 
 #include <cuda.h>
 
+#include <hc_am.hpp>
+
 #include <kalmar_runtime.h>
 #include <kalmar_aligned_alloc.h>
 
 #define KALMAR_DEBUG 0
 
+#ifndef KALMAR_DEBUG_ASYNC_COPY
+#define KALMAR_DEBUG_ASYNC_COPY (0)
+#endif
+
 #define KALMAR_PTX_JIT_ERRLOG_SIZE 8192
-// threshold to clean up finished kernel in HSAQueue.asyncOps
+// threshold to clean up finished kernel in CudaQueue.asyncOps
 // default set as 1024
 #define ASYNCOPS_VECTOR_GC_SIZE (1024)
 
 // TODO: not safe to turn off this option for it is hard to determine dependency of object with offset
 #define DISABLE_ASYNC_MEMORY_WRITE_AND_COPY 1
+
+// Maximum number of inflight commands sent to a single queue.
+// If limit is exceeded, HCC will force a queue wait to reclaim
+// resources (signals, kernarg)
+#define MAX_INFLIGHT_COMMANDS_PER_QUEUE  512
+
+#define DEPENDENCY_SIGNAL_CNT (5)
+
+// synchronization for copy commands in the same stream, regardless of command type.
+// Add a signal dependencies between async copies -
+// so completion signal from prev command used as input dep to next.
+// If FORCE_SIGNAL_DEP_BETWEEN_COPIES=0 then data copies of the same kind (H2H, H2D, D2H, D2D)
+// are assumed to be implicitly ordered.
+// ROCR 1.2 runtime implementation currently provides this guarantee when using SDMA queues and compute shaders.
+#define FORCE_SIGNAL_DEP_BETWEEN_COPIES (0)
+
 
 extern "C" void PushArgImpl(void *k_, int idx, size_t sz, const void *s);
 extern "C" void PushArgPtrImpl(void *k_, int idx, size_t sz, const void *s);
@@ -50,6 +72,32 @@ static void __checkCuda(CUresult err, const char* file, const int line) {
 #define OutPrivate(var)
 #endif
 
+// FIXME: Some member funcitons are not supported on CUDA
+#define UNSUPPORTED_WARNING() \
+  { std::cout << "[Warning] Unsupported function: " << __func__ << "\n"; }
+
+#define UNSUPPORTED_FATAL() \
+  { std::cout << "[Fatal Error] Unsupported function: " << __func__ << "\n"; exit(1); }
+
+#define CASE_STRING(X)  case X: case_string = #X ;break;
+
+static const char* getHcCommandKindString(Kalmar::hcCommandKind k) {
+  const char* case_string;
+
+  switch(k) {
+    using namespace Kalmar;
+    CASE_STRING(hcCommandInvalid);
+    CASE_STRING(hcMemcpyHostToHost);
+    CASE_STRING(hcMemcpyHostToDevice);
+    CASE_STRING(hcMemcpyDeviceToHost);
+    CASE_STRING(hcMemcpyDeviceToDevice);
+    CASE_STRING(hcCommandKernel);
+    CASE_STRING(hcCommandMarker);
+    default: case_string = "Unknown command type";
+  };
+  return case_string;
+};
+
 namespace Kalmar {
 
 // forward declaration
@@ -59,21 +107,88 @@ class CudaQueue;
 class CudaCommonAsyncOp : public Kalmar::KalmarAsyncOp
 {
 private:
+  bool _isSubmitted;
   std::shared_future<void>* future;
-  Kalmar::CudaQueue* cudaQueue;
+  Kalmar::CudaQueue* _queue;
   CUevent hEvent;
   Kalmar::hcWaitMode waitMode;
 
+  // prior dependencies
+  // maximum up to 5 prior dependencies could be associated with one
+  uint64_t depCount;
+
+  // array of all operations that this op depends on.
+  // This array keeps a reference which prevents those ops from being deleted until this op is deleted.
+  std::shared_ptr<KalmarAsyncOp> depAsyncOps [DEPENDENCY_SIGNAL_CNT];
+
 public:
+  inline bool isSubmitted() { return _isSubmitted; }
+  inline void setSubmitted(bool b) { _isSubmitted = b; }
+
   std::shared_future<void>* getFuture() override { return future; }
- 
-  CudaCommonAsyncOp() : KalmarAsyncOp(Kalmar::hcCommandInvalid), future(nullptr), cudaQueue(nullptr) {
-    CheckCudaError(cuEventCreate(&hEvent, CU_EVENT_DISABLE_TIMING));
+
+  void setFuture(std::shared_future<void>* f) {
+    if (future && future->valid()) {
+      future->wait();
+    }
+    future = f;
   }
 
-  ~CudaCommonAsyncOp() { dispose(); }
+  inline CUevent getCudaEvent() { return hEvent; }
+  void* getNativeHandle() override { return hEvent; }
+#define E_S CU_EVENT_DISABLE_TIMING | CU_EVENT_BLOCKING_SYNC
+  CudaCommonAsyncOp(Kalmar::hcCommandKind cmd = Kalmar::hcCommandInvalid,
+                    Kalmar::hcWaitMode mode = Kalmar::hcWaitModeActive)
+	    : KalmarAsyncOp(cmd), _isSubmitted(false), future(nullptr), _queue(nullptr),
+    waitMode(mode), depCount(0)
+  {
+    CheckCudaError(cuEventCreate(&hEvent, E_S));
+  }
 
-  void enqueueAsync(Kalmar::CudaQueue*);
+  CudaCommonAsyncOp(std::shared_ptr <Kalmar::KalmarAsyncOp> dependent_op,
+                    Kalmar::hcCommandKind cmd = Kalmar::hcCommandInvalid,
+                    Kalmar::hcWaitMode mode = Kalmar::hcWaitModeActive)
+    : KalmarAsyncOp(cmd), _isSubmitted(false), future(nullptr), _queue(nullptr),
+      waitMode(mode), depCount(1)
+  {
+    depAsyncOps[0] = dependent_op;
+    CheckCudaError(cuEventCreate(&hEvent, E_S));
+  }
+
+  CudaCommonAsyncOp(int count,
+                    std::shared_ptr <Kalmar::KalmarAsyncOp> *dependent_op_array,
+                    Kalmar::hcCommandKind cmd = Kalmar::hcCommandInvalid,
+                    Kalmar::hcWaitMode mode = Kalmar::hcWaitModeActive)
+     : KalmarAsyncOp(cmd), _isSubmitted(false), future(nullptr), _queue(nullptr),
+       waitMode(mode), depCount(count)
+  {
+    if ((count > 0) && (count <= DEPENDENCY_SIGNAL_CNT)) {
+      for (int i = 0; i < count; ++i) {
+        depAsyncOps[i] = dependent_op_array[i];
+      }
+    } else {
+      // throw an exception
+      throw Kalmar::runtime_exception("Incorrect number of dependent signals passed to CudaBarrier constructor", count);
+    }
+    CheckCudaError(cuEventCreate(&hEvent, E_S));
+  }
+
+  ~CudaCommonAsyncOp() {
+#if 0//KALMAR_DEBUG
+    std::cerr << "CudaCommonAsyncOp::~CudaCommonAsyncOp() op = "
+              << getHcCommandKindString(this->getCommandKind())
+              << " ,seq = " << getSeqNum() << std::endl;
+#endif
+    if(_isSubmitted && hEvent) {
+      waitCompleteByEvent(hEvent);
+    }
+
+    dispose();
+  }
+
+  inline void setQueue(CudaQueue* queue) { _queue = queue; }
+
+  inline CudaQueue* getQueue() { return _queue; }
 
   bool isReady() override {
     CUresult rt = cuEventQuery(hEvent);
@@ -94,40 +209,141 @@ public:
       delete future;
       future = nullptr;
     }
-
+    // Release referecne to our dependent ops:
+    for (int i=0; i<depCount; i++) {
+      depAsyncOps[i] = nullptr;
+    }
   }
+
+  void enqueue(Kalmar::CudaQueue*);
+
+  // Synchronize stream
+  void syncStream();
+
+  void waitForDependencies();
+
+  void waitComplete();
+
+  uint64_t getTimestampFrequency() override {
+    UNSUPPORTED_WARNING();
+    return 0L;
+  }
+
+  uint64_t getBeginTimestamp() override {
+    UNSUPPORTED_WARNING();
+    return 0L;
+  }
+
+  uint64_t getEndTimestamp() override {
+    UNSUPPORTED_WARNING();
+    return 0L;
+  }
+
+private:
+  void waitCompleteByEvent(CUevent);
+
 }; // End of CudaCommonAsyncOp
 
-class CudaExecution : public Kalmar::KalmarAsyncOp
+class CudaBarrier : public CudaCommonAsyncOp
+{
+public:
+  CudaBarrier() : CudaCommonAsyncOp(Kalmar::hcCommandMarker, Kalmar::hcWaitModeBlocked)
+  {}
+
+  CudaBarrier(std::shared_ptr <Kalmar::KalmarAsyncOp> dependent_op)
+    : CudaCommonAsyncOp(dependent_op, Kalmar::hcCommandMarker, Kalmar::hcWaitModeBlocked)
+  {}
+
+  CudaBarrier(int count, std::shared_ptr <Kalmar::KalmarAsyncOp> *dependent_op_array)
+    : CudaCommonAsyncOp(count, dependent_op_array, Kalmar::hcCommandMarker, Kalmar::hcWaitModeBlocked)
+  {}
+
+  void enqueueAsync(Kalmar::CudaQueue*);
+
+}; // End of CudaBarrier
+
+class CudaCopy : public CudaCommonAsyncOp {
+private:
+  // If copy is dependent on another operation, record reference here.
+  // keep a reference which prevents those ops from being deleted until this op is deleted.
+  std::shared_ptr<KalmarAsyncOp> depAsyncOp;
+
+  // source pointer
+  const void* src;
+
+  // destination pointer
+  void* dst;
+
+  // bytes to be copied
+  size_t sizeBytes;
+
+public:
+  CudaCopy(const void* src_, void* dst_, size_t sizeBytes_)
+    : CudaCommonAsyncOp(Kalmar::hcCommandInvalid, Kalmar::hcWaitModeActive), depAsyncOp(nullptr),
+      src(src_), dst(dst_), sizeBytes(sizeBytes_) {
+#if KALMAR_DEBUG
+    std::cerr << "CudaCopy::CudaCopy(" << src_ << ", " << dst_ << ", " << sizeBytes_ << ")\n";
+#endif
+  }
+
+  void asyncCopy(Kalmar::CudaQueue*);
+
+  void enqueueAsync(Kalmar::CudaQueue*) override;
+
+  // synchronous version of copy
+  void syncCopy(Kalmar::CudaQueue*);
+
+  void syncCopyExt(Kalmar::CudaQueue *queue, Kalmar::hcCommandKind copyDir, const hc::AmPointerInfo &srcPtrInfo, const hc::AmPointerInfo &dstPtrInfo);
+
+  ~CudaCopy() { depAsyncOp = nullptr; }
+
+}; // end of CudaCopy
+
+static Kalmar::hcCommandKind resolveMemcpyDirection(const void* src, void* dst)
+{
+  CUdeviceptr base;
+  size_t size;
+  auto d = reinterpret_cast<CUdeviceptr>(dst);
+  auto s = reinterpret_cast<CUdeviceptr>(src);
+  bool d_host = false;
+  bool s_host = false;
+  CUresult result = cuMemGetAddressRange(&base, &size, d);
+  if (result != CUDA_SUCCESS) { d_host = true; }
+
+  result = cuMemGetAddressRange(&base, &size, s);
+  if (result != CUDA_SUCCESS) { s_host = true; }
+
+  unsigned int flags;
+
+  if (cuMemHostGetFlags(&flags, dst) == CUDA_SUCCESS) { d_host = true; }
+  if (cuMemHostGetFlags(&flags, const_cast<void*>(src)) == CUDA_SUCCESS) { s_host = true; }
+
+  if (d_host && !s_host) {
+    return Kalmar::hcMemcpyDeviceToHost;
+  } else if (s_host && !d_host) {
+    return Kalmar::hcMemcpyHostToDevice;
+  } else if (!s_host && !d_host) {
+    return Kalmar::hcMemcpyDeviceToDevice;
+  } else {
+    return Kalmar::hcMemcpyHostToHost;
+  }
+}
+
+class CudaExecution : public CudaCommonAsyncOp
 {
 public:
   CudaExecution(CudaDevice* dev, CUmodule m, CUfunction f)
-     : KalmarAsyncOp(Kalmar::hcCommandInvalid), device(dev), hmod(m), cf(f),
-       future(nullptr), dynamicGroupSize(0), _queue(nullptr), hEvent(nullptr) {
+     : CudaCommonAsyncOp(Kalmar::hcCommandKernel, Kalmar::hcWaitModeBlocked),
+       device(dev), hmod(m), cf(f), dynamicGroupSize(0)
+  {
     clearArgs();
-    CheckCudaError(cuEventCreate(&hEvent, CU_EVENT_DISABLE_TIMING));
   }
 
   ~CudaExecution() { dispose(); }
   
-  bool isReady() override {
-    CUresult rt = cuEventQuery(hEvent);
-    switch(rt) {
-      case CUDA_SUCCESS: return true;
-      case CUDA_ERROR_NOT_READY: return false;
-      default: return false;
-    }
-  }
-
   void dispose() {
     clearArgs();
     std::vector<uint8_t>().swap(argVec);
-    CheckCudaError(cuEventDestroy(hEvent));
-
-    if (future != nullptr) {
-      delete future;
-      future = nullptr;
-    }
   }
 
   void clearArgs() {
@@ -162,14 +378,10 @@ public:
   void setStructures(size_t nr_dim, size_t* global_size, size_t* local_size);
 
   // Blocking
-  void launch(CudaQueue* queue);
+  void dispatchKernelWaitComplete(CudaQueue* queue);
 
   // Non-blocking
-  void launchAsync(CudaQueue* queue);
-
-  std::shared_future<void>* getFuture() override { return future; }
-
-  void waitComplete(void* e);
+  void dispatchKernelAsync(CudaQueue* queue);
 
   void setDynamicGroupSegment(size_t dynamicGroupSize) {
     this->dynamicGroupSize = dynamicGroupSize;
@@ -185,11 +397,9 @@ private:
   std::string location;
   std::vector<uint8_t> argVec;  // Kernel args
   size_t argCount;              // Kernel arg count
-  std::shared_future<void>* future;
-  CudaQueue* _queue;
-  CUevent hEvent;
 
   size_t dynamicGroupSize;
+
 }; // End of CudaExecution
 
 class CudaQueue: public KalmarQueue
@@ -197,7 +407,7 @@ class CudaQueue: public KalmarQueue
 public:
   CudaQueue(KalmarDevice* pDev, CUcontext context, execute_order order)
         : KalmarQueue(pDev, queuing_mode_automatic, order), hStream(nullptr),
-        deviceCtx(context), asyncOps(),
+        deviceCtx(context), asyncOps(), opSeqNums(0), youngestCommandKind(hcCommandInvalid),
         bufferKernelMap(), kernelBufferMap() {
     CheckCudaError(cuCtxGetStreamPriorityRange(&leastPri, &greatestPri));
     isPriSupport = (leastPri || greatestPri);
@@ -212,11 +422,17 @@ public:
 
   void setCurrent() override { CheckCudaError(cuCtxSetCurrent(deviceCtx)); }
 
+  void* getStream() override { return hStream; }
+
   void flush() override {
   }
 
-  void wait(hcWaitMode mode = hcWaitModeBlocked) override {
+  void wait(Kalmar::hcWaitMode mode = hcWaitModeBlocked) override {
     // wait on all previous async operations to complete
+    // Go in reverse order (from youngest to oldest).
+    // Ensures younger ops have chance to complete before older ops reclaim their resources
+
+    // FIXME: how to ensure no deadlock?
     for (int i = 0; i < asyncOps.size(); ++i) {
       if (asyncOps[i] != nullptr) {
         auto asyncOp = asyncOps[i];
@@ -265,8 +481,9 @@ public:
       } else {
         std::shared_ptr<CudaCommonAsyncOp> op = std::make_shared<CudaCommonAsyncOp>();
         CheckCudaError(cuMemcpyHtoDAsync(ptr + offset, src, count, hStream));
-        op->enqueueAsync(this);
-        asyncOps.push_back(op);
+        op->enqueue(this);
+        pushAsyncOp(op);
+
         // Update dm (dm+offset?) dependency
         bufferKernelMap[dm].clear();
         bufferKernelMap[dm].push_back(op);
@@ -326,9 +543,9 @@ public:
       } else {
         std::shared_ptr<CudaCommonAsyncOp> op = std::make_shared<CudaCommonAsyncOp>();
         CheckCudaError(cuMemcpyDtoDAsync(dstdm + dst_offset, srcdm + src_offset, count, hStream));
-        op->enqueueAsync(this);
+        op->enqueue(this);
         // Update dependencies
-        asyncOps.push_back(op);
+        pushAsyncOp(op);
         //bufferKernelMap[src].clear();
         bufferKernelMap[src].push_back(op);
         //bufferKernelMap[dst].clear();
@@ -381,9 +598,22 @@ public:
     CudaExecution *thin = reinterpret_cast<CudaExecution*>(exec);
     thin->setStructures(nr_dim, global_size, local_size);
     thin->setDynamicGroupSegment(dynamic_group_size);
-    thin->launch(this);
-    
-    // Cuda driver ensures the completion at this point    
+
+    // wait for previous kernel dispatches be completed
+    std::for_each(std::begin(kernelBufferMap[exec]), std::end(kernelBufferMap[exec]),
+      [&] (void* buffer) {
+      waitForDependentAsyncOps(buffer);
+    });
+
+    waitForStreamDeps(thin);
+
+    thin->dispatchKernelWaitComplete(this);
+
+    // clear data in kernelBufferMap
+    kernelBufferMap[exec].clear();
+    kernelBufferMap.erase(exec);
+
+    // CUDA driver ensures the completion at this point
     delete thin;
   }
 
@@ -399,57 +629,222 @@ public:
 
     // wait for previous kernel dispatches be completed
     std::for_each(std::begin(kernelBufferMap[exec]), std::end(kernelBufferMap[exec]),
-            [&] (void* buffer) {
-            waitForDependentAsyncOps(buffer);
-           });
+            [&] (void* buffer)
+    {
+      waitForDependentAsyncOps(buffer);
+    });
 
-    thin->launchAsync(this);
+    thin->dispatchKernelAsync(this);
+
     std::shared_ptr<KalmarAsyncOp> op(thin);
-    asyncOps.push_back(op);
+    pushAsyncOp(op);
     // associate all buffers used by the kernel with the kernel dispatch instance
     std::for_each(std::begin(kernelBufferMap[exec]), std::end(kernelBufferMap[exec]),
           [&] (void* buffer) {
-          bufferKernelMap[buffer].push_back(op);
-         });
+      bufferKernelMap[buffer].push_back(op);
+    });
 
     // clear data in kernelBufferMap
     kernelBufferMap[exec].clear();
-    
+    kernelBufferMap.erase(exec);
+
     return op;
   }
 
+  uint32_t GetGroupSegmentSize(void *ker) override {
+    UNSUPPORTED_FATAL();
+    return 0;
+  }
+
   // wait for dependent async operations to complete
-    void waitForDependentAsyncOps(void* buffer) {
-        auto dependentAsyncOpVector = bufferKernelMap[buffer];
-        for (int i = 0; i < dependentAsyncOpVector.size(); ++i) {
-          auto dependentAsyncOp = dependentAsyncOpVector[i];
-          if (!dependentAsyncOp.expired()) {
-            auto dependentAsyncOpPointer = dependentAsyncOp.lock();
-            // wait on valid futures only
-            std::shared_future<void>* future = dependentAsyncOpPointer->getFuture();
-            if (future->valid()) {
-              future->wait();
-            }
-          }
+  void waitForDependentAsyncOps(void* buffer) {
+    auto dependentAsyncOpVector = bufferKernelMap[buffer];
+    for (int i = 0; i < dependentAsyncOpVector.size(); ++i) {
+      auto dependentAsyncOp = dependentAsyncOpVector[i];
+      if (!dependentAsyncOp.expired()) {
+        auto dependentAsyncOpPointer = dependentAsyncOp.lock();
+        // wait on valid futures only
+        std::shared_future<void>* future = dependentAsyncOpPointer->getFuture();
+        if (future->valid()) {
+          future->wait();
         }
-        dependentAsyncOpVector.clear();
+      }
+    }
+    dependentAsyncOpVector.clear();
+  }
+
+  // get 'Command Queue'
+  inline CUstream getCudaStream() { return hStream; }
+
+  // Save the command and type
+  void pushAsyncOp(std::shared_ptr<KalmarAsyncOp> op) {
+    op->setSeqNum(++opSeqNums);
+
+#if KALMAR_DEBUG_ASYNC_COPY
+    std::cerr << "  pushing op=" << op << "  #" << op->getSeqNum()
+      << "  commandKind=" << getHcCommandKindString(op->getCommandKind()) << std::endl;
+#endif
+
+    if (asyncOps.size() >= MAX_INFLIGHT_COMMANDS_PER_QUEUE) {
+#if KALMAR_DEBUG_ASYNC_COPY
+      std::cerr << "Hit max inflight ops asyncOps.size=" << asyncOps.size() << ". op#" << opSeqNums << " force sync\n";
+#endif
+      wait();
+    }
+    asyncOps.push_back(op);
+
+    youngestCommandKind = op->getCommandKind();
+  }
+
+  // Check the command kind for the upcoming command that will be sent to this queue
+  // if it differs from the youngest async op sent to the queue, we may need to insert additional synchronization.
+  // The function returns nullptr if no dependency is required. For example, back-to-back commands of same type
+  // are often implicitly synchronized so no dependency is required.
+  // Also different modes and optimizations can control when dependencies are added.
+  std::shared_ptr<KalmarAsyncOp> detectStreamDeps(KalmarAsyncOp *newOp) {
+    hcCommandKind newCommandKind = newOp->getCommandKind();
+    assert (newCommandKind != hcCommandInvalid);
+
+    if (!asyncOps.empty()) {
+      assert (youngestCommandKind != hcCommandInvalid);
+
+      bool needDep = false;
+      if  (newCommandKind != youngestCommandKind) {
+        needDep = true;
+      }
+
+      if (((newCommandKind == hcCommandKernel) && (youngestCommandKind == hcCommandMarker)) ||
+         ((newCommandKind == hcCommandMarker) && (youngestCommandKind == hcCommandKernel))) {
+
+        // No dependency required since Marker and Kernel share same queue and are ordered by AQL barrier bit.
+        needDep = false;
+      } else if (FORCE_SIGNAL_DEP_BETWEEN_COPIES && isCopyCommand(newCommandKind) && isCopyCommand(youngestCommandKind)) {
+        needDep = true;
+      }
+
+      if (needDep) {
+#if KALMAR_DEBUG_ASYNC_COPY
+        std::cerr <<  "command type changed " << getHcCommandKindString(youngestCommandKind) << "  ->  " << getHcCommandKindString(newCommandKind) << "\n" ;
+#endif
+        return asyncOps.back();
+      }
     }
 
+    return nullptr;
+  }
 
-  CUstream getCudaStream() { return hStream; }
+  void waitForStreamDeps (KalmarAsyncOp *newOp) {
+    std::shared_ptr<KalmarAsyncOp> depOp = detectStreamDeps(newOp);
+    if (depOp != nullptr) {
+#if KALMAR_DEBUG
+      std::cerr << " wait for steam: " << depOp << "\n";
+#endif
+      EnqueueMarkerWithDependency(1, &depOp);
+    }
+  }
+
+  int getPendingAsyncOps() override {
+    int count = 0;
+    for (int i = 0; i < asyncOps.size(); ++i) {
+      auto asyncOp = asyncOps[i];
+      if (asyncOp != nullptr) {
+      CUevent e = reinterpret_cast <CUevent> (asyncOp->getNativeHandle());
+      if (!asyncOp->isReady())
+        ++count;
+      }
+    }
+    return count;
+  }
 
   // enqueue a barrier packet
   std::shared_ptr<KalmarAsyncOp> EnqueueMarker() override {
     // create shared_ptr instance
-    std::shared_ptr<CudaCommonAsyncOp> barrier = std::make_shared<CudaCommonAsyncOp>();
+    std::shared_ptr<CudaBarrier> barrier = std::make_shared<CudaBarrier>();
 
     // enqueue the barrier
     barrier.get()->enqueueAsync(this);
 
     // associate the barrier with this queue
-    asyncOps.push_back(barrier);
+    pushAsyncOp(barrier);
 
     return barrier;
+  }
+
+   // enqueue a barrier packet with multiple prior dependencies
+   std::shared_ptr<KalmarAsyncOp> EnqueueMarkerWithDependency(int count, std::shared_ptr <KalmarAsyncOp> *depOps) override {
+    if ((count > 0) && (count <= DEPENDENCY_SIGNAL_CNT)) {
+      // create shared_ptr instance
+      std::shared_ptr<CudaBarrier> barrier = std::make_shared<CudaBarrier>(count, depOps);
+
+      // enqueue the barrier
+      barrier.get()->enqueueAsync(this);
+
+      // associate the barrier with this queue
+      pushAsyncOp(barrier);
+
+      return barrier;
+    } else {
+      // throw an exception
+      throw Kalmar::runtime_exception("Incorrect number of dependent signals passed to CudaBarrier constructor", count);
+    }
+  }
+
+  // enqueue an async copy command
+  std::shared_ptr<KalmarAsyncOp> EnqueueAsyncCopy(const void *src, void *dst, size_t size_bytes) override {
+
+    // create shared_ptr instance
+    std::shared_ptr<CudaCopy> copyCommand = std::make_shared<CudaCopy>(src, dst, size_bytes);
+
+    // euqueue the async copy command
+    copyCommand.get()->enqueueAsync(this);
+
+    // associate the async copy command with this queue
+    pushAsyncOp(copyCommand);
+
+    return copyCommand;
+  }
+
+  // synchronous copy
+  void copy(const void *src, void *dst, size_t size_bytes) override {
+#if KALMAR_DEBUG
+    std::cerr << "CudaQueue::copy(" << src << ", " << dst << ", " << size_bytes << ")\n";
+#endif
+    // wait for all previous async commands in this queue to finish
+    this->wait();
+
+    // create a CudaCopy instance
+    // TODO: add its dependency
+    CudaCopy* copyCommand = new CudaCopy(src, dst, size_bytes);
+
+    // synchronously do copy
+    copyCommand->syncCopy(this);
+
+    delete(copyCommand);
+
+#if KALMAR_DEBUG
+    std::cerr << "CudaQueue::copy() complete\n";
+#endif
+  }
+
+  void copy_ext(const void *src, void *dst, size_t size_bytes, Kalmar::hcCommandKind copyDir, const hc::AmPointerInfo &srcInfo, const hc::AmPointerInfo &dstInfo) override {
+#if KALMAR_DEBUG
+    std::cerr << "CudaQueue::copy_ext(" << src << ", " << dst << ", " << size_bytes << ")\n";
+#endif
+    // wait for all previous async commands in this queue to finish
+    this->wait();
+
+    // create a CudaCopy instance
+    CudaCopy* copyCommand = new CudaCopy(src, dst, size_bytes);
+
+    // synchronously do copy
+    copyCommand->syncCopyExt(this, copyDir, srcInfo, dstInfo);
+
+    // TODO - should remove from queue instead?
+    delete(copyCommand);
+
+#if KALMAR_DEBUG
+    std::cerr << "CudaQueue::copy_ext() complete\n";
+#endif
   }
 
   // remove finished async operation from waiting list
@@ -495,6 +890,11 @@ public:
     if (hStream) dispose();
   }
 
+  bool set_cu_mask(const std::vector<bool>& cu_mask) override {
+    UNSUPPORTED_FATAL();
+    return false;
+  }
+
 private:
    CUstream hStream;
    int leastPri;
@@ -502,92 +902,161 @@ private:
    bool isPriSupport;
    execute_order order;
    std::vector< std::shared_ptr<KalmarAsyncOp> > asyncOps;
+   uint64_t opSeqNums;
+
+   // Kind of the youngest command in the queue.
+   // Used to detect and enforce dependencies between commands.
+   hcCommandKind youngestCommandKind;
+
    std::map<void*, std::vector< std::weak_ptr<KalmarAsyncOp> > > bufferKernelMap;
    std::map<void*, std::vector<void*> > kernelBufferMap;
    CUcontext deviceCtx;  // equal to device's context for multiple threading
 }; // End of CudaQueue
 
-void CudaCommonAsyncOp::enqueueAsync(Kalmar::CudaQueue* queue) {
-  this->cudaQueue = queue;
-  CUstream hStream = queue->getCudaStream();
-  CheckCudaError(cuEventRecord(hEvent, hStream));
-
-  // dynamically allocate a std::shared_future<void> object
-  future = new std::shared_future<void>(std::async(std::launch::deferred, [&] {
-    if (hEvent == nullptr) return;
-    CheckCudaError(cuStreamWaitEvent(hStream, this->hEvent, 0));
-    if (this->cudaQueue != nullptr) {
-      this->cudaQueue->removeAsyncOp(this);
+void CudaCommonAsyncOp::waitForDependencies() {
+  for (int i = 0; i < depCount; ++i) {
+    if (!depAsyncOps[i]) continue;
+    if (CUevent e = reinterpret_cast<CUevent>(depAsyncOps[i]->getNativeHandle())) {
+      waitCompleteByEvent(e);
     }
-  }).share());
-}
-
-void CudaExecution::waitComplete(void* e) {
-  if (e == nullptr) return;
-  CUevent hEvent = reinterpret_cast<CUevent>(e);
-  CheckCudaError(cuStreamWaitEvent(this->_queue->getCudaStream(), hEvent, 0));
-
-  // unregister this async operation from HSAQueue
-  if (this->_queue != nullptr) {
-    this->_queue->removeAsyncOp(this);
   }
 }
 
-void CudaExecution::launch(CudaQueue* queue) {
-  this->_queue = queue;
-  CUstream hStream = queue->getCudaStream();
-
-  int size = argVec.size();
-  void* Extra[] = {
-    CU_LAUNCH_PARAM_BUFFER_POINTER, argVec.data(),
-    CU_LAUNCH_PARAM_BUFFER_SIZE,    &size,
-    CU_LAUNCH_PARAM_END
-  };
-  void** extra = size?Extra:nullptr;
+void CudaCommonAsyncOp::syncStream() {
+  CheckCudaError(cuStreamSynchronize(getQueue()->getCudaStream()));
 #if KALMAR_DEBUG
-  std::cout << "gridDim: " << gridDim[0] << ", " << gridDim[1] << ", "<< gridDim[2] << "\n";
-  std::cout << "blockDim: " << blockDim[0] << ", " << blockDim[1] << ", "<< blockDim[2] << "\n";
+  std::cerr << "CudaCommonAsyncOp is over, op = " << getHcCommandKindString(this->getCommandKind())
+            << " ,seq = " << getSeqNum() << std::endl;
 #endif
 
-  CheckCudaError(cuLaunchKernel(cf, gridDim[0], gridDim[1], gridDim[2],
-                 blockDim[0], blockDim[1], blockDim[2],
-                 0/*sharedMemBytes*/, hStream, nullptr/*kernelParams*/, extra));
-  CheckCudaError(cuStreamSynchronize(hStream));
+  // unregister this async operation from CudaQueue
+  if (_queue != nullptr) {
+    _queue->removeAsyncOp(this);
+  }
+  setSubmitted(false);
 }
 
-void CudaExecution::launchAsync(CudaQueue* queue) {
-  this->_queue = queue;
-  CUstream hStream = queue->getCudaStream();
+void CudaCommonAsyncOp::waitComplete() {
+  if (!isSubmitted()) return;
+  CheckCudaError(cuEventRecord(getCudaEvent(), getQueue()->getCudaStream()));
+  waitCompleteByEvent(getCudaEvent());
+}
 
-  int size = argVec.size();
-  void* Extra[] = {
-    CU_LAUNCH_PARAM_BUFFER_POINTER, argVec.data(),
-    CU_LAUNCH_PARAM_BUFFER_SIZE,    &size,
-    CU_LAUNCH_PARAM_END
-  };
-  void** extra = size?Extra:nullptr;
+void CudaCommonAsyncOp::waitCompleteByEvent(CUevent e) {
+  if (e == nullptr) return;
+  if (!isSubmitted()) return;
+  CheckCudaError(cuEventRecord(e, getQueue()->getCudaStream()));
+  CheckCudaError(cuStreamWaitEvent(getQueue()->getCudaStream(), e, 0));
+
 #if KALMAR_DEBUG
-  //int i = 0;
-  //std::cout << "int alignment: " << __alignof(i) << "\n";
-  //uint64_t j = 0;
-  //std::cout << "int64 aligment: " << __alignof(j) << "\n";
-  //std::cout << "size: " << size << "\n";
-  //std::cout << "arg count: " << argCount << "\n";
-  std::cout << "gridDim: " << gridDim[0] << ", " << gridDim[1] << ", "<< gridDim[2] << "\n";
-  std::cout << "blockDim: " << blockDim[0] << ", " << blockDim[1] << ", "<< blockDim[2] << "\n";
+  std::cerr << "CudaCommonAsyncOp is over, op = " << getHcCommandKindString(this->getCommandKind()) 
+            << " ,seq = " << getSeqNum() << std::endl;
 #endif
 
-  CheckCudaError(cuLaunchKernel(cf, gridDim[0], gridDim[1], gridDim[2],
-                 blockDim[0], blockDim[1], blockDim[2],
-                 0/*sharedMemBytes*/, hStream, NULL/*kernelParams*/, extra));
-  CheckCudaError(cuEventRecord(hEvent, hStream));
+  // unregister this async operation from CudaQueue
+  if (_queue != nullptr) {
+    _queue->removeAsyncOp(this);
+  }
+  setSubmitted(false);
+}
+
+void CudaCommonAsyncOp::enqueue(Kalmar::CudaQueue* queue) {
+  if (isSubmitted()) {
+#if KALMAR_DEBUG
+    std::cerr << "CudaCommonAsyncOp::enqueueAsync already submitted!\n";
+#endif
+  }
+  setQueue(queue);
+  setSubmitted(true);
 
   // dynamically allocate a std::shared_future<void> object
   future = new std::shared_future<void>(std::async(std::launch::deferred, [&] {
-    // wait for completion
-    waitComplete(hEvent);
+    waitComplete();
   }).share());
+}
 
+void CudaBarrier::enqueueAsync(Kalmar::CudaQueue* queue) {
+  if (isSubmitted()) {
+#if KALMAR_DEBUG
+    std::cerr << "CudaCommonAsyncOp::enqueueAsync already submitted!\n";
+#endif
+  }
+  setQueue(queue);
+  setSubmitted(true);
+
+  // dynamically allocate a std::shared_future<void> object
+  setFuture( new std::shared_future<void>(std::async(std::launch::deferred, [&] {
+    waitForDependencies();
+    waitComplete();
+  }).share()) );
+}
+
+void CudaExecution::dispatchKernelWaitComplete(CudaQueue* queue) {
+  if (isSubmitted()) return;
+
+  setQueue(queue);
+  setSubmitted(true);
+
+  // dynamically allocate a std::shared_future<void> object
+  //setFuture( new std::shared_future<void>(std::async(std::launch::deferred, [&] {
+
+    int size = argVec.size();
+    void* Extra[] = {
+      CU_LAUNCH_PARAM_BUFFER_POINTER, argVec.data(),
+      CU_LAUNCH_PARAM_BUFFER_SIZE,    &size,
+      CU_LAUNCH_PARAM_END
+    };
+    void** extra = size?Extra:nullptr;
+#if KALMAR_DEBUG
+    std::cout << "gridDim: " << gridDim[0] << ", " << gridDim[1] << ", "<< gridDim[2] << "\n";
+    std::cout << "blockDim: " << blockDim[0] << ", " << blockDim[1] << ", "<< blockDim[2] << "\n";
+#endif
+
+    waitForDependencies();
+    CheckCudaError(cuLaunchKernel(cf, gridDim[0], gridDim[1], gridDim[2],
+              blockDim[0], blockDim[1], blockDim[2],
+              0/*sharedMemBytes*/, getQueue()->getCudaStream(), nullptr/*kernelParams*/, extra));
+
+    // Synchronize stream
+    syncStream();
+
+  //}).share()) );
+}
+
+void CudaExecution::dispatchKernelAsync(CudaQueue* queue) {
+  if (isSubmitted()) return;
+
+  setQueue(queue);
+  setSubmitted(true);
+
+  // dynamically allocate a std::shared_future<void> object
+  setFuture( new std::shared_future<void>(std::async(std::launch::deferred, [&] {
+
+    int size = argVec.size();
+    void* Extra[] = {
+      CU_LAUNCH_PARAM_BUFFER_POINTER, argVec.data(),
+      CU_LAUNCH_PARAM_BUFFER_SIZE,    &size,
+      CU_LAUNCH_PARAM_END
+    };
+    void** extra = size?Extra:nullptr;
+#if KALMAR_DEBUG
+    //int i = 0;
+    //std::cout << "int alignment: " << __alignof(i) << "\n";
+    //uint64_t j = 0;
+    //std::cout << "int64 aligment: " << __alignof(j) << "\n";
+    //std::cout << "size: " << size << "\n";
+    //std::cout << "arg count: " << argCount << "\n";
+    std::cout << "gridDim: " << gridDim[0] << ", " << gridDim[1] << ", "<< gridDim[2] << "\n";
+    std::cout << "blockDim: " << blockDim[0] << ", " << blockDim[1] << ", "<< blockDim[2] << "\n";
+#endif
+
+    waitForDependencies();
+    CheckCudaError(cuLaunchKernel(cf, gridDim[0], gridDim[1], gridDim[2],
+                 blockDim[0], blockDim[1], blockDim[2],
+                 0/*sharedMemBytes*/, getQueue()->getCudaStream(), NULL/*kernelParams*/, extra));
+
+    waitComplete();
+  }).share()) );
 }
 
 class CudaDevice: public KalmarDevice
@@ -720,7 +1189,7 @@ public:
                                          options, optionValues);
       if (err != CUDA_SUCCESS) {
         free(ptx_source);
-        std::cout << "Error in loading. Log: " << error_log << "\n";
+        std::cerr << "Error in loading. Log: " << error_log << "\n";
         exit(1);
       }
 #else
@@ -795,6 +1264,38 @@ public:
     return q;
   }
 
+  size_t GetmaxTileStaticSize() override {
+    UNSUPPORTED_FATAL();
+    return 0;
+  }
+
+  std::vector< std::shared_ptr<KalmarQueue> > get_all_queues() override {
+    std::vector< std::shared_ptr<KalmarQueue> > result;
+    queues_mutex.lock();
+    for (auto queue : queues) {
+     if (!queue.expired()) {
+        result.push_back(queue.lock());
+      }
+    }
+    queues_mutex.unlock();
+    return result;
+  }
+
+  bool is_peer(const Kalmar::KalmarDevice* other) override {
+    UNSUPPORTED_FATAL();
+    return false;
+  }
+
+  unsigned int get_compute_unit_count() override {
+    UNSUPPORTED_FATAL();
+    return 0;
+  }
+
+  bool has_cpu_accessible_am() override {
+    UNSUPPORTED_FATAL();
+    return false;
+  };
+
   ~CudaDevice() {
     // release all queues
     queues_mutex.lock();
@@ -835,7 +1336,194 @@ protected:
     int devMajor;
     int devMinor;
     int supportUnified;
+}; // End of CudaDevice
+
+void CudaCopy::enqueueAsync(CudaQueue* queue) {
+  if (isSubmitted()) {
+    std::cerr << "CudaCopy::enqueueAsync already submitted\n";
+    return;
+  }
+
+  setQueue(queue);
+
+  hc::accelerator acc;
+  hc::AmPointerInfo srcPtrInfo(NULL, NULL, 0, acc, 0, 0);
+  hc::AmPointerInfo dstPtrInfo(NULL, NULL, 0, acc, 0, 0);
+
+  bool srcInTracker = (hc::am_memtracker_getinfo(&srcPtrInfo, src) == AM_SUCCESS);
+  bool dstInTracker = (hc::am_memtracker_getinfo(&dstPtrInfo, dst) == AM_SUCCESS);
+
+  if (!srcInTracker) {
+    // throw an exception
+    throw Kalmar::runtime_exception("trying to copy from unpinned src pointer", 0);
+  } else if (!dstInTracker) {
+    // throw an exception
+    throw Kalmar::runtime_exception("trying to copy from unpinned dst pointer", 0);
+  } else {
+    setSubmitted(true);
+    setFuture( new std::shared_future<void>(std::async(std::launch::deferred, [&] {
+      if (getCudaEvent() == nullptr) return;
+      waitForDependencies();
+      asyncCopy(getQueue());
+
+      waitComplete();
+    }).share()) );
+  }
+}
+
+// Copy am_copy impl
+void CudaCopy::asyncCopy(Kalmar::CudaQueue* queue)
+{
+  // Resolve default to a specific Kind so we know which algorithm to use:
+  Kalmar::hcCommandKind copyDir = Kalmar::resolveMemcpyDirection(src, dst);
+  setCommandKind(copyDir);
+
+  auto d = reinterpret_cast<CUdeviceptr>(dst);
+  auto s = reinterpret_cast<CUdeviceptr>(src);
+
+  CUstream hStream = queue->getCudaStream();
+  Kalmar::CudaDevice *device = static_cast<Kalmar::CudaDevice*> (queue->getDev());
+
+#if KALMAR_DEBUG
+  std::cerr << "hcCommandKind: " << getHcCommandKindString(copyDir) << "\n";
+#endif
+
+  switch (copyDir) {
+    case Kalmar::hcMemcpyHostToDevice:
+#if KALMAR_DEBUG
+      std::cerr << "CudaCopy::asyncCopy(), invoke CopyHostToDevice()\n";
+#endif
+      queue->setCurrent();
+      CheckCudaError(cuMemcpyHtoDAsync(d, src, sizeBytes, hStream));
+      break;
+
+    case Kalmar::hcMemcpyDeviceToHost:
+#if KALMAR_DEBUG
+      std::cerr << "CudaCopy::asyncCopy(), invoke CopyDeviceToHost()\n";
+#endif
+      queue->setCurrent();
+      CheckCudaError(cuMemcpyDtoHAsync(dst, s, sizeBytes, hStream));
+      break;
+
+    case Kalmar::hcMemcpyHostToHost:
+#if KALMAR_DEBUG
+      std::cerr << "CudaCopy::syncCopy(), invoke memmove\n";
+#endif
+      // Since this is sync copy, we assume here that the GPU has already drained younger commands.
+
+      // This works for both mapped and unmapped memory:
+      std::memmove(dst, src, sizeBytes);
+      break;
+
+    case Kalmar::hcMemcpyDeviceToDevice:
+#if KALMAR_DEBUG
+      std::cerr << "CudaCopy:: P2P copy by engine forcing use of host copy\n";
+#endif
+      queue->setCurrent();
+      CheckCudaError(cuMemcpyDtoDAsync(d, s, sizeBytes, hStream));
+      break;
+
+    default:
+      break;
+  }
+}
+
+// Copy am_copy impl. CUDA Driver has its own memtracker
+void CudaCopy::syncCopyExt(Kalmar::CudaQueue *queue, Kalmar::hcCommandKind copyDir, const hc::AmPointerInfo &srcPtrInfo, const hc::AmPointerInfo &dstPtrInfo)
+{
+  bool srcInTracker = (srcPtrInfo._sizeBytes != 0);
+  bool dstInTracker = (dstPtrInfo._sizeBytes != 0);
+
+  auto d = reinterpret_cast<CUdeviceptr>(dst);
+  auto s = reinterpret_cast<CUdeviceptr>(src);
+
+  // record CudaQueue association
+  setQueue(queue);
+  CUstream hStream = queue->getCudaStream();
+
+  Kalmar::CudaDevice *device = static_cast<Kalmar::CudaDevice*> (queue->getDev());
+
+#if KALMAR_DEBUG
+  std::cerr << "hcCommandKind: " << getHcCommandKindString(copyDir) << "\n";
+#endif
+
+  switch (copyDir) {
+    case Kalmar::hcMemcpyHostToDevice:
+#if KALMAR_DEBUG
+      std::cerr << "CudaCopy::syncCopy(), invoke CopyHostToDevice()\n";
+#endif
+      queue->setCurrent();
+      CheckCudaError(cuMemcpyHtoD(d, src, sizeBytes));
+      break;
+
+    case Kalmar::hcMemcpyDeviceToHost:
+#if KALMAR_DEBUG
+      std::cerr << "CudaCopy::syncCopy(), invoke CopyDeviceToHost()\n";
+#endif
+      queue->setCurrent();
+      CheckCudaError(cuMemcpyDtoH(dst, s, sizeBytes));
+      break;
+
+    case Kalmar::hcMemcpyHostToHost:
+#if KALMAR_DEBUG
+      std::cerr << "CudaCopy::syncCopy(), invoke memcpy\n";
+#endif
+      // Since this is sync copy, we assume here that the GPU has already drained younger commands.
+
+      // This works for both mapped and unmapped memory:
+      std::memmove(dst, src, sizeBytes);
+      break;
+
+    case Kalmar::hcMemcpyDeviceToDevice:
+#if KALMAR_DEBUG
+      std::cerr << "CudaCopy:: P2P copy by engine forcing use of host copy\n";
+#endif
+      queue->setCurrent();
+      CheckCudaError(cuMemcpyDtoD(d, s, sizeBytes));
+      break;
+
+    default:
+      break;
+  }
+}
+
+void CudaCopy::syncCopy(Kalmar::CudaQueue* queue) {
+#if KALMAR_DEBUG
+  std::cerr << "CudaCopy::syncCopy(" << queue << "), src = " << src << ", dst = " << dst << ", sizeBytes = " << sizeBytes << "\n";
+#endif
+
+  bool srcInTracker = false;
+  bool srcInDeviceMem = false;
+  bool dstInTracker = false;
+  bool dstInDeviceMem = false;
+
+  hc::accelerator acc;
+  hc::AmPointerInfo srcPtrInfo(NULL, NULL, 0, acc, 0, 0);
+  hc::AmPointerInfo dstPtrInfo(NULL, NULL, 0, acc, 0, 0);
+
+  if (hc::am_memtracker_getinfo(&srcPtrInfo, src) == AM_SUCCESS) {
+    srcInTracker = true;
+    srcInDeviceMem = (srcPtrInfo._isInDeviceMem);
+  }  // Else - srcNotMapped=srcInDeviceMem=false
+
+  if (hc::am_memtracker_getinfo(&dstPtrInfo, dst) == AM_SUCCESS) {
+    dstInTracker = true;
+    dstInDeviceMem = (dstPtrInfo._isInDeviceMem);
+  } // Else - dstNotMapped=dstInDeviceMem=false
+
+#if KALMAR_DEBUG
+  std::cerr << "srcInTracker: " << srcInTracker << "\n";
+  std::cerr << "srcInDeviceMem: " << srcInDeviceMem << "\n";
+  std::cerr << "dstInTracker: " << dstInTracker << "\n";
+  std::cerr << "dstInDeviceMem: " << dstInDeviceMem << "\n";
+#endif
+
+  // Resolve default to a specific Kind so we know which algorithm to use:
+  setCommandKind (Kalmar::resolveMemcpyDirection(src, dst));
+
+  syncCopyExt(queue, getCommandKind(), srcPtrInfo, dstPtrInfo);
 };
+
 
 template <typename T> inline void deleter(T* ptr) { delete ptr; }
 
@@ -905,7 +1593,7 @@ void CudaExecution::setStructures(size_t nr_dim, size_t* global_size, size_t* lo
     // ensure the inputs are within hardware limitation
     for (int i = 0; i < nr_dim; ++i) {
       if(global_size[i] > device->maxBlockDim[i] * device->maxGridDim[i]) {
-        std::cout << "Exit. level: " << i << ", extent is too large: " << global_size[i] << "\n";
+        std::cerr << "Exit. level: " << i << ", extent is too large: " << global_size[i] << "\n";
         exit(1);
       }
     }
@@ -918,14 +1606,13 @@ void CudaExecution::setStructures(size_t nr_dim, size_t* global_size, size_t* lo
       blockDim[i] = std::min((int)global_size[i], device->maxBlockDim[i]);
       blockDim[i] = std::min((int)local_size[i], (int)blockDim[i]);
       threads *= blockDim[i];
-      // if no local_size specified, blockDim[i] = 1 at this point$
+      // if no local_size specified, blockDim[i] = 1 at this point
       gridDim[i] = (global_size[i] + blockDim[i] - 1) / blockDim[i];
     }
     if (!dynamic && threads > maxThreadsPerBlock) {
-      std::cout << "Exit. User given threads in a block are too many: " << threads << "\n";
+      std::cerr << "Exit. User given threads in a block are too many: " << threads << "\n";
       exit(1);
     }
-
 
     // if no user specified local_size, let runtime determines grid/block
     if (dynamic) {
@@ -955,7 +1642,7 @@ void CudaExecution::setStructures(size_t nr_dim, size_t* global_size, size_t* lo
       } while (level < nr_dim);
 
       if (threads > maxThreadsPerBlock) {
-        std::cout << "Exit. Dynamically distributed threads in a block are too many: " << threads << "\n";
+        std::cerr << "Exit. Dynamically distributed threads in a block are too many: " << threads << "\n";
         exit(1);
       }
 

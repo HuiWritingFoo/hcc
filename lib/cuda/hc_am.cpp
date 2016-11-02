@@ -1,8 +1,6 @@
 #include "hc_am.hpp"
 #include <cuda.h>
 
-#define ENABLE_TRACKER 1
-
 #define DB_TRACKER 0
 
 #if DB_TRACKER 
@@ -23,7 +21,6 @@ static void __checkCuda(CUresult err, const char* file, const int line) {
   }
 }
 
-#if ENABLE_TRACKER
 //=========================================================================================================
 // Pointer Tracker Structures:
 //=========================================================================================================
@@ -41,6 +38,7 @@ AmPointerInfo & AmPointerInfo::operator= (const AmPointerInfo &other)
   _isAmManaged = other._isAmManaged;
   _appId = other._appId;
   _appAllocationFlags = other._appAllocationFlags;
+  _queue = other._queue;
 
   return *this;
 }
@@ -175,7 +173,6 @@ void AmPointerTracker::update_peers (const hc::accelerator &acc, int peerCnt, hs
 // Global var defs:
 //=========================================================================================================
 AmPointerTracker g_amPointerTracker;  // Track all am pointer allocations.
-#endif
 
 //=========================================================================================================
 // API Definitions.
@@ -183,6 +180,7 @@ AmPointerTracker g_amPointerTracker;  // Track all am pointer allocations.
 
 namespace hc {
 static Kalmar::KalmarQueue* sg_queue;
+
 // Allocate accelerator memory, return NULL if memory could not be allocated:
 auto_voidp am_alloc(size_t sizeBytes, hc::accelerator &acc, unsigned flags)
 {
@@ -197,19 +195,17 @@ auto_voidp am_alloc(size_t sizeBytes, hc::accelerator &acc, unsigned flags)
         CheckCudaError(cuMemAllocHost(&ptr, sizeBytes));
         CUdeviceptr* pdptr;
         CheckCudaError(cuMemHostGetDevicePointer(pdptr, ptr, 0/*Must be 0*/));
-#if ENABLE_TRACKER
-         g_amPointerTracker.insert(ptr,
-           hc::AmPointerInfo(ptr/*hostPointer*/, pdptr /*devicePointer*/, sizeBytes, acc, false/*isDevice*/, true /*isAMManaged*/));
-#endif
+
+        g_amPointerTracker.insert(ptr,
+          hc::AmPointerInfo(ptr/*hostPointer*/, pdptr /*devicePointer*/, sizeBytes, acc, false/*isDevice*/, true /*isAMManaged*/, queue));
       } else {
         CUdeviceptr dm;
         CheckCudaError(cuMemAlloc(&dm, sizeBytes));
         ptr = reinterpret_cast<void*>(dm);
+
         // track device pointer
-#if ENABLE_TRACKER
-         g_amPointerTracker.insert(ptr,
-           hc::AmPointerInfo(NULL/*hostPointer*/, ptr /*devicePointer*/, sizeBytes, acc, true/*isDevice*/, true /*isAMManaged*/));
-#endif
+        g_amPointerTracker.insert(ptr,
+          hc::AmPointerInfo(NULL/*hostPointer*/, ptr /*devicePointer*/, sizeBytes, acc, true/*isDevice*/, true /*isAMManaged*/, queue));
      }
     }
   }
@@ -220,7 +216,6 @@ am_status_t am_free(void* ptr)
 {
   am_status_t status = AM_SUCCESS;
   if (ptr != NULL) {
-    //sg_queue->setCurrent();
     unsigned int flags;
     if (cuMemHostGetFlags(&flags,ptr) == CUDA_SUCCESS) {
       CheckCudaError(cuMemFreeHost(ptr));
@@ -228,12 +223,12 @@ am_status_t am_free(void* ptr)
       auto dm = reinterpret_cast<CUdeviceptr>(ptr);
       CheckCudaError(cuMemFree(dm));
     }
-#if ENABLE_TRACKER
+
     int numRemoved = g_amPointerTracker.remove(ptr) ;
     if (numRemoved == 0) {
       status = AM_ERROR_MISC;
     }
-#endif
+
   }
   return status;
 }
@@ -254,18 +249,32 @@ am_status_t am_copy(void*  dst, const void*  src, size_t sizeBytes)
 
   // TODO: using default stream block any asynchronization on the same device
   unsigned int flags;
-  //sg_queue->setCurrent();
 
   if (cuMemHostGetFlags(&flags, dst) == CUDA_SUCCESS) { d_host = true; }
   if (cuMemHostGetFlags(&flags, const_cast<void*>(src)) == CUDA_SUCCESS) { s_host = true; }
 
   // TODO: have multi-threading issue. Need set current context
   if (d_host && !s_host) {
-    CheckCudaError(cuMemcpyDtoH(dst, s, sizeBytes));//, hStream));
+    auto it = g_amPointerTracker.find(dst);
+    if (it != g_amPointerTracker.end())
+      it->second._queue->setCurrent();
+
+    CUstream st = reinterpret_cast<CUstream>(sg_queue->getStream());
+    CheckCudaError(cuMemcpyDtoHAsync(dst, s, sizeBytes, st));
+    CheckCudaError(cuStreamSynchronize(st));
   } else if (s_host && !d_host) {
-    CheckCudaError(cuMemcpyHtoD(d, src, sizeBytes));//, hStream))
+    auto it = g_amPointerTracker.find(src);
+    if (it != g_amPointerTracker.end())
+      it->second._queue->setCurrent();
+
+    CUstream st = reinterpret_cast<CUstream>(sg_queue->getStream());
+    CheckCudaError(cuMemcpyHtoDAsync(d, src, sizeBytes, st));
+    CheckCudaError(cuStreamSynchronize(st));
   } else if (!s_host && !d_host) {
-    CheckCudaError(cuMemcpyDtoD(d, s, sizeBytes));//, hStream))
+    sg_queue->setCurrent();
+    CUstream st = reinterpret_cast<CUstream>(sg_queue->getStream());
+    CheckCudaError(cuMemcpyDtoDAsync(d, s, sizeBytes, st));
+    CheckCudaError(cuStreamSynchronize(st));
   } else {
     std::memmove(dst, src, sizeBytes);
   }
@@ -273,8 +282,6 @@ am_status_t am_copy(void*  dst, const void*  src, size_t sizeBytes)
   return AM_SUCCESS;
 }
 
-
-#if ENABLE_TRACKER
 am_status_t am_memtracker_getinfo(hc::AmPointerInfo *info, const void *ptr)
 {
   auto infoI = g_amPointerTracker.find(ptr);
@@ -491,6 +498,5 @@ am_status_t am_memory_host_unlock(hc::accelerator &ac, void *hostPtr)
 #endif
   return am_status;
 }
-#endif
 
-} // end namespace hc.
+} // end namespace hc
