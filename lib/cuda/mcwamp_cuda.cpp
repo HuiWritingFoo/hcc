@@ -634,6 +634,8 @@ public:
       waitForDependentAsyncOps(buffer);
     });
 
+    waitForStreamDeps(thin);
+
     thin->dispatchKernelAsync(this);
 
     std::shared_ptr<KalmarAsyncOp> op(thin);
@@ -925,7 +927,7 @@ void CudaCommonAsyncOp::waitForDependencies() {
 void CudaCommonAsyncOp::syncStream() {
   CheckCudaError(cuStreamSynchronize(getQueue()->getCudaStream()));
 #if KALMAR_DEBUG
-  std::cerr << "CudaCommonAsyncOp is over, op = " << getHcCommandKindString(this->getCommandKind())
+  std::cerr << "CudaCommonAsyncOp (sync) is over, op = " << getHcCommandKindString(this->getCommandKind())
             << " ,seq = " << getSeqNum() << std::endl;
 #endif
 
@@ -947,9 +949,11 @@ void CudaCommonAsyncOp::waitCompleteByEvent(CUevent e) {
   if (!isSubmitted()) return;
   CheckCudaError(cuEventRecord(e, getQueue()->getCudaStream()));
   CheckCudaError(cuStreamWaitEvent(getQueue()->getCudaStream(), e, 0));
+  // TODO: use cuEventSynchronize(e) to block CPU?
+  while(cuEventQuery(e) != CUDA_SUCCESS);
 
 #if KALMAR_DEBUG
-  std::cerr << "CudaCommonAsyncOp is over, op = " << getHcCommandKindString(this->getCommandKind()) 
+  std::cerr << "CudaCommonAsyncOp is over, op = " << getHcCommandKindString(this->getCommandKind())
             << " ,seq = " << getSeqNum() << std::endl;
 #endif
 
