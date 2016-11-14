@@ -23,7 +23,9 @@
 #include <kalmar_runtime.h>
 #include <kalmar_aligned_alloc.h>
 
-#define KALMAR_DEBUG 0
+#ifndef KALMAR_DEBUG
+#define KALMAR_DEBUG (0)
+#endif
 
 #ifndef KALMAR_DEBUG_ASYNC_COPY
 #define KALMAR_DEBUG_ASYNC_COPY (0)
