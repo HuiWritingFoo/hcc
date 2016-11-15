@@ -190,14 +190,14 @@ auto_voidp am_alloc(size_t sizeBytes, hc::accelerator &acc, unsigned flags)
       auto kq = Kalmar::getContext()->getDevice(acc.get_device_path())->get_default_queue();
       Kalmar::KalmarQueue* queue = kq.get();
       sg_queue = queue;
-      kq->setCurrent();
+      queue->setCurrent();
       if (flags & amHostPinned) {
         CheckCudaError(cuMemAllocHost(&ptr, sizeBytes));
-        CUdeviceptr* pdptr;
-        CheckCudaError(cuMemHostGetDevicePointer(pdptr, ptr, 0/*Must be 0*/));
+        CUdeviceptr pdptr;
+        CheckCudaError(cuMemHostGetDevicePointer(&pdptr, ptr, 0/*Must be 0*/));
 
         g_amPointerTracker.insert(ptr,
-          hc::AmPointerInfo(ptr/*hostPointer*/, pdptr /*devicePointer*/, sizeBytes, acc, false/*isDevice*/, true /*isAMManaged*/, queue));
+          hc::AmPointerInfo(ptr/*hostPointer*/, reinterpret_cast<void*>(pdptr) /*devicePointer*/, sizeBytes, acc, false/*isDevice*/, true /*isAMManaged*/, queue));
       } else {
         CUdeviceptr dm;
         CheckCudaError(cuMemAlloc(&dm, sizeBytes));
