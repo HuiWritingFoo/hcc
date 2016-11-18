@@ -1,6 +1,10 @@
 #include "hc_am.hpp"
 #include <cuda.h>
 
+#ifndef KALMAR_DEBUG
+#define KALMAR_DEBUG (0)
+#endif
+
 #define DB_TRACKER 0
 
 #if DB_TRACKER 
@@ -220,8 +224,18 @@ am_status_t am_free(void* ptr)
     if (cuMemHostGetFlags(&flags,ptr) == CUDA_SUCCESS) {
       CheckCudaError(cuMemFreeHost(ptr));
     } else {
+      CUdeviceptr base;
+      size_t size;
       auto dm = reinterpret_cast<CUdeviceptr>(ptr);
-      CheckCudaError(cuMemFree(dm));
+      CUresult result = cuMemGetAddressRange(&base, &size, dm);
+      if (result == CUDA_SUCCESS) {
+        CheckCudaError(cuMemFree(dm));
+      } else {
+        // Occasinally input a host raw pointer?
+#if KALMAR_DEBUG
+        std::cerr << "try to free a host raw pointer:" << dm << " in am_free\n";
+#endif
+      }
     }
 
     int numRemoved = g_amPointerTracker.remove(ptr) ;
