@@ -455,7 +455,7 @@ if [ $LOWER_CUDA == 1 ]; then
   DIS=$BINDIR/llvm-dis
   LLC=$BINDIR/llc
 
-  $LINK $LINK_KERNEL_ARGS | $OPT -always-inline - -o $TEMP_DIR/kernel.bc
+  $LINK $LINK_KERNEL_ARGS 2>>/dev/null | $OPT -always-inline - -o $TEMP_DIR/kernel.bc
 
   # lower to CUDA ISA
   if [ $VERBOSE == 1 ]; then
