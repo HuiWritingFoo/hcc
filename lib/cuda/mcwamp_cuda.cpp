@@ -193,12 +193,8 @@ public:
   inline CudaQueue* getQueue() { return _queue; }
 
   bool isReady() override {
-    CUresult rt = cuEventQuery(hEvent);
-    switch(rt) {
-      case CUDA_SUCCESS: return true;
-      case CUDA_ERROR_NOT_READY: return false;
-      default: return false;
-    }
+    if (_isSubmitted) return false;
+    else return true;
   }
 
   void setWaitMode(hcWaitMode mode) override {
@@ -942,7 +938,6 @@ void CudaCommonAsyncOp::syncStream() {
 
 void CudaCommonAsyncOp::waitComplete() {
   if (!isSubmitted()) return;
-  CheckCudaError(cuEventRecord(getCudaEvent(), getQueue()->getCudaStream()));
   waitCompleteByEvent(getCudaEvent());
 }
 
