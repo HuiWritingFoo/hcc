@@ -36,6 +36,13 @@ void cxxflags(void) {
         std::cout << " -hc";
     }
 
+    // This is only intended to inform compiler to use expected triple.
+    // No other effect due to the value specified in this option.
+    // TODO: Might have side effect to other HCC frontend if using the same option.
+    if (CUDA_TARGET_GPU_ARCH != "") {
+      std::cout << " --cuda-gpu-arch=" CUDA_TARGET_GPU_ARCH;
+    }
+
     // Common options
     std::cout << " -std=c++amp -stdlib=libc++";
 
