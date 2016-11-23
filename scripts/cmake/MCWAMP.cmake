@@ -21,7 +21,12 @@ set(MCWAMP_INC_DIR "${PROJECT_SOURCE_DIR}/include")
 macro(amp_target name )
 	target_compile_definitions(${name} PRIVATE "GTEST_HAS_TR1_TUPLE=0")
 	target_include_directories(${name} PRIVATE ${GTEST_INC_DIR} ${LIBCXX_INC_DIR} ${MCWAMP_INC_DIR})
+   if(HAS_CUDA)
+        # dummy cuda gpu arch to inform compiler to use expected triple
+        target_compile_options(${name} PUBLIC -stdlib=libc++ -std=c++amp -fPIC --cuda-gpu-arch=)
+   else()
 	target_compile_options(${name} PUBLIC -stdlib=libc++ -std=c++amp -fPIC)
+   endif()
         target_link_libraries(${name} -stdlib=libc++)
 endmacro(amp_target name )
 
