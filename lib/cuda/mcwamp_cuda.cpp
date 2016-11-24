@@ -1609,7 +1609,7 @@ void CudaExecution::setStructures(size_t nr_dim, size_t* global_size, size_t* lo
       threads *= blockDim[i];
       // if no local_size specified, blockDim[i] = 1 at this point
       gridDim[i] = (global_size[i] + blockDim[i] - 1) / blockDim[i];
-      if (gridDim[i] > device->maxGridDim[i]) {
+      if (!dynamic && gridDim[i] > device->maxGridDim[i]) {
         std::cerr << "Exit. Grid dimension[" << i << "]: " << gridDim[i] <<" is out of range!\n"
                   << "The max in that dimension is " << device->maxGridDim[i] << "\n";
         exit(1);
