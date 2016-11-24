@@ -407,6 +407,8 @@ public:
         : KalmarQueue(pDev, queuing_mode_automatic, order), hStream(nullptr),
         deviceCtx(context), asyncOps(), opSeqNums(0), youngestCommandKind(hcCommandInvalid),
         bufferKernelMap(), kernelBufferMap() {
+    // Before any use of stream and memory APIs
+    setCurrent();
     CheckCudaError(cuCtxGetStreamPriorityRange(&leastPri, &greatestPri));
     isPriSupport = (leastPri || greatestPri);
     OutPrivate(leastPri);
