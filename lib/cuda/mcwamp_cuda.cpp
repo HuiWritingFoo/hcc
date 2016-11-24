@@ -761,7 +761,7 @@ public:
   // enqueue a barrier packet
   std::shared_ptr<KalmarAsyncOp> EnqueueMarker() override {
     // create shared_ptr instance
-    std::shared_ptr<CudaBarrier> barrier = std::make_shared<CudaBarrier>();
+    std::shared_ptr<CudaBarrier> barrier = std::make_shared<CudaBarrier>(asyncOps.size(), asyncOps.data());
 
     // enqueue the barrier
     barrier.get()->enqueueAsync(this);
@@ -917,9 +917,10 @@ private:
 
 void CudaCommonAsyncOp::waitForDependencies() {
   for (int i = 0; i < depCount; ++i) {
-    if (!depAsyncOps[i]) continue;
-    if (CUevent e = reinterpret_cast<CUevent>(depAsyncOps[i]->getNativeHandle())) {
-      waitCompleteByEvent(e);
+    if (!depAsyncOps[i] || depAsyncOps[i]->getSeqNum() == this->getSeqNum()) continue;
+    std::shared_future<void>* future = depAsyncOps[i]->getFuture();
+    if (future->valid()) {
+      future->wait();
     }
   }
 }
