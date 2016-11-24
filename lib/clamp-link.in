@@ -492,7 +492,12 @@ if [ $LOWER_CUDA == 1 ]; then
          -load $LIB/LLVMEraseNonkernel@CMAKE_SHARED_LIBRARY_SUFFIX@ \
          -load $LIB/LLVMTileUniform@CMAKE_SHARED_LIBRARY_SUFFIX@ \
          -strip-debug -promote-globals -erase-nonkernels -tile-uniform -dce -globaldce < $TEMP_DIR/kernel.bc -o $TEMP_DIR/$TARGET_CO.common.promote.bc
-    fi
+  fi
+
+  if [ $? == 1 ]; then
+    echo "Promoting kernel failed"
+    exit 1
+  fi
 
   $OPT $TEMP_DIR/$TARGET_CO.common.promote.bc -load $LIB/LLVMMarshallArgs@CMAKE_SHARED_LIBRARY_SUFFIX@ -marshall-args -dce -o $TEMP_DIR/$TARGET_CO.promote.bc
 
