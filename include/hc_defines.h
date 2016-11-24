@@ -88,4 +88,4 @@ class auto_voidp {
 #define HCC_BACKEND_AMDGPU (1)
 #define HCC_BACKEND_HSAIL  (2)
 #define HCC_BACKEND_CL     (3)
-
+#define HCC_BACKEND_CUDA   (4)
