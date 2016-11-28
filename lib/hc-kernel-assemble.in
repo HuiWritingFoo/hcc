@@ -23,6 +23,11 @@ LLVM_DIS=$BINDIR/llvm-dis
 CLAMP_ASM=$BINDIR/clamp-assemble
 LIBPATH=$BINDIR/../lib
 CXXFLAGS="-std=c++amp -stdlib=libc++ -I$BINDIR/../../include -fPIC"
+# Unfortunately need to hint this for CUDA backend
+HAS_CUDA=@HAS_CUDA@
+if [ $HAS_CUDA == "1" ]; then
+    CXXFLAGS=$CXXFLAGS" --cuda-gpu-arch=";
+fi
 # Set additional CXXFLAGS based on CMAKE_BUILD_TYPE
 shopt -s nocasematch
 CMAKE_BUILD_TYPE="@CMAKE_BUILD_TYPE@"
