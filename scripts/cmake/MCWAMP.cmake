@@ -27,7 +27,6 @@ macro(amp_target name )
    else()
 	target_compile_options(${name} PUBLIC -stdlib=libc++ -std=c++amp -fPIC)
    endif()
-        target_link_libraries(${name} -stdlib=libc++)
 endmacro(amp_target name )
 
 ####################
