@@ -358,12 +358,13 @@ fi
 ret=0
 
 if [ $LOWER_CUDA == 1 ]; then
+if [ ${#LINK_KERNEL_ARGS[@]} != 0 ]; then
   LIB=$BINDIR/../lib
   MATHLIB=$BINDIR/../../lib
   DIS=$BINDIR/llvm-dis
   LLC=$BINDIR/llc
 
-  $LINK $LINK_KERNEL_ARGS 2>>/dev/null | $OPT -always-inline - -o $TEMP_DIR/kernel.bc
+  $LINK "${LINK_KERNEL_ARGS[@]}" 2>>/dev/null | $OPT -always-inline - -o $TEMP_DIR/kernel.bc
 
   # lower to CUDA ISA
   if [ $VERBOSE == 1 ]; then
@@ -467,7 +468,7 @@ if [ $LOWER_CUDA == 1 ]; then
   popd > /dev/null
 
   # link everything together
-  ld --allow-multiple-definition $TEMP_DIR/kernel_cuda.o $LINK_HOST_ARGS $LINK_CPU_ARG $LINK_OTHER_ARGS
+  ld --allow-multiple-definition $TEMP_DIR/kernel_cuda.o "${LINK_HOST_ARGS[@]}" "${LINK_CPU_ARGS[@]}" "${LINK_OTHER_ARGS[@]}"
   ret=$?
 
   if [ -e $TEMP_DIR/kernel_cuda.o ]; then
@@ -475,6 +476,7 @@ if [ $LOWER_CUDA == 1 ]; then
   fi
 
   rm -f $TEMP_DIR/kernel-*.ptx
+fi # if [ -n $LINK_KERNEL_ARGS ];
 
 else # if [- $LOWER_CUDA == 1];
 
