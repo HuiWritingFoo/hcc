@@ -11,6 +11,11 @@
 #include <iostream>
 #include <cassert>
 #include "clamp-config.hxx"
+
+// macro for stringification 
+#define XSTR(S) STR(S)
+#define STR(S) #S
+
 /* Flag set by ‘--verbose’. */
 static int verbose_flag;
 static bool build_mode = false, install_mode = true; // use install mode by default
@@ -42,6 +47,9 @@ void cxxflags(void) {
     if (CUDA_TARGET_GPU_ARCH != "") {
       std::cout << " --cuda-gpu-arch=" CUDA_TARGET_GPU_ARCH;
     }
+
+    // Add include path to the libcxx headers
+    std::cout << " -I " XSTR(LIBCXX_HEADER) ;
 
     // Common options
     std::cout << " -std=c++amp -stdlib=libc++";
@@ -85,7 +93,7 @@ void ldflags(void) {
         }
     }
 
-    std::cout << " -lc++ -lc++abi -ldl -lpthread ";
+    std::cout << " -lc++ -lc++abi -ldl -lm -lpthread ";
     if (const char *p = getenv("TEST_CPU"))
         if (p == std::string("ON"))
         std::cout << " -lmcwamp_atomic ";

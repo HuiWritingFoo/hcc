@@ -5,7 +5,10 @@
 
 namespace hc {
 class AmPointerInfo;
+class completion_future;
 }; // end namespace hc
+
+typedef struct hsa_kernel_dispatch_packet_s hsa_kernel_dispatch_packet_t;
 
 namespace Kalmar {
 namespace enums {
@@ -216,6 +219,8 @@ public:
   virtual void* getHSAAMRegion() { return nullptr; }
 
   virtual void* getHSAAMHostRegion() { return nullptr; }
+  
+  virtual void* getHSACoherentAMHostRegion() { return nullptr; }
 
   /// get kernarg region handle
   virtual void* getHSAKernargRegion() { return nullptr; }
@@ -233,18 +238,28 @@ public:
 
   /// copy src to dst asynchronously
   virtual std::shared_ptr<KalmarAsyncOp> EnqueueAsyncCopy(const void* src, void* dst, size_t size_bytes) { return nullptr; }
+  virtual std::shared_ptr<KalmarAsyncOp> EnqueueAsyncCopyExt(const void* src, void* dst, size_t size_bytes, 
+                                                             hcCommandKind copyDir, const hc::AmPointerInfo &srcInfo, const hc::AmPointerInfo &dstInfo, 
+                                                             const Kalmar::KalmarDevice *copyDevice) { return nullptr; };
 
   // Copy src to dst synchronously
   virtual void copy(const void *src, void *dst, size_t size_bytes) { }
 
   /// copy src to dst, with caller providing extended information about the pointers.
-  virtual void copy_ext(const void *src, void *dst, size_t size_bytes, hcCommandKind copyDir, const hc::AmPointerInfo &srcInfo, const hc::AmPointerInfo &dstInfo, bool forceHostCopyEngine) { };
+  //// TODO - remove me, this form is deprecated.
+  virtual void copy_ext(const void *src, void *dst, size_t size_bytes, hcCommandKind copyDir, const hc::AmPointerInfo &srcInfo, const hc::AmPointerInfo &dstInfo, bool forceUnpinnedCopy) { };
+  virtual void copy_ext(const void *src, void *dst, size_t size_bytes, hcCommandKind copyDir, const hc::AmPointerInfo &srcInfo, const hc::AmPointerInfo &dstInfo, 
+                        const Kalmar::KalmarDevice *copyDev, bool forceUnpinnedCopy) { };
 
   /// cleanup internal resource
   /// this function is usually called by dtor of the implementation classes
   /// in rare occasions it may be called by other functions to ensure proper
   /// resource clean up sequence
   virtual void dispose() {}
+
+  virtual void dispatch_hsa_kernel(const hsa_kernel_dispatch_packet_t *aql, 
+                                   const void * args, size_t argsize,
+                                   hc::completion_future *cf)  { };
  
   /// set CU affinity of this queue.
   /// the setting is permanent until the queue is destroyed or another setting
@@ -319,7 +334,7 @@ public:
     virtual void BuildProgram(void* size, void* source) {}
 
     /// create kernel
-    virtual void* CreateKernel(const char* fun, void* size, void* source) { return nullptr; }
+    virtual void* CreateKernel(const char* fun) { return nullptr; }
 
     /// check if a given kernel is compatible with the device
     virtual bool IsCompatibleKernel(void* size, void* source) { return true; }
@@ -423,7 +438,7 @@ public:
     std::shared_ptr<KalmarQueue> createQueue(execute_order order = execute_in_order) override { return std::shared_ptr<KalmarQueue>(new CPUQueue(this)); }
     void* create(size_t count, struct rw_info* /* not used */ ) override { return kalmar_aligned_alloc(0x1000, count); }
     void release(void* ptr, struct rw_info* /* nout used */) override { kalmar_aligned_free(ptr); }
-    void* CreateKernel(const char* fun, void* size, void* source) { return nullptr; }
+    void* CreateKernel(const char* fun) { return nullptr; }
 };
 
 /// KalmarContext
@@ -531,12 +546,11 @@ static inline void copy_helper(std::shared_ptr<KalmarQueue>& srcQueue, void* src
     /// If device pointer comes from cpu, let the device queue to handle the copy
     /// For example, if src is on cpu and dst is on device,
     /// in OpenCL, clEnqueueWrtieBuffer to write data from src to device
-    if (is_cpu_queue(srcQueue))
-        dstQueue->write(dst, (char*)src + src_offset, cnt, dst_offset, block);
-    else if (is_cpu_queue(dstQueue))
+    
+    if (is_cpu_queue(dstQueue))
         srcQueue->read(src, (char*)dst + dst_offset, cnt, src_offset);
     else
-        dstQueue->copy(src, dst, cnt, src_offset, dst_offset, block);
+        dstQueue->write(dst, (char*)src + src_offset, cnt, dst_offset, block);
 }
 
 /// software MSI protocol

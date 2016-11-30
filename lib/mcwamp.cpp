@@ -395,13 +395,7 @@ void BuildProgram(KalmarQueue* pQueue) {
 
 // used in parallel_for_each.h
 void *CreateKernel(std::string s, KalmarQueue* pQueue) {
-  size_t kernel_size = 0;
-  void* kernel_source = nullptr;
-  bool needs_compilation = true;
-
-  DetermineAndGetProgram(pQueue, &kernel_size, &kernel_source);
-
-  return pQueue->getDev()->CreateKernel(s.c_str(), (void *)kernel_size, kernel_source);
+  return pQueue->getDev()->CreateKernel(s.c_str());
 }
 
 void PushArg(void *k_, int idx, size_t sz, const void *s) {
@@ -437,12 +431,17 @@ public:
 
       // get context
       KalmarContext* context = static_cast<KalmarContext*>(runtime->m_GetContextImpl());
+    
+      const std::vector<KalmarDevice*> devices = context->getDevices();
 
-      // get default queue on the default device
-      std::shared_ptr<KalmarQueue> queue = context->auto_select();
+      for (auto dev = devices.begin(); dev != devices.end(); dev++) {
 
-      // build kernels on the default queue on the default device
-      CLAMP::BuildProgram(queue.get());
+        // get default queue on the default device
+        std::shared_ptr<KalmarQueue> queue = (*dev)->get_default_queue();
+  
+        // build kernels on the default queue on the default device
+        CLAMP::BuildProgram(queue.get());
+      }
     }
   }
 };
