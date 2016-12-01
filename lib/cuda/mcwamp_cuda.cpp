@@ -54,6 +54,10 @@
 // ROCR 1.2 runtime implementation currently provides this guarantee when using SDMA queues and compute shaders.
 #define FORCE_SIGNAL_DEP_BETWEEN_COPIES (0)
 
+// cutoff size used in FNV-1a hash function
+// default set as 768, this is a heuristic value
+// which is larger than HSA BrigModuleHeader and AMD GCN ISA header (Elf64_Ehdr)
+#define FNV1A_CUTOFF_SIZE (768)
 
 extern "C" void PushArgImpl(void *k_, int idx, size_t sz, const void *s);
 extern "C" void PushArgPtrImpl(void *k_, int idx, size_t sz, const void *s);
@@ -1068,7 +1072,7 @@ class CudaDevice: public KalmarDevice
 friend class CudaExecution;
 public:
   CudaDevice(CUdevice device, int ordinal)
-    : KalmarDevice(access_type_none), programs(),
+    : KalmarDevice(access_type_none), programs(), functions(),
       queues(), queues_mutex(), device(device) {
 
     char name[256] = {0x0}; 
@@ -1134,26 +1138,42 @@ public:
   bool is_emulated() const override { return false; }
   uint32_t get_version() const override { return ((static_cast<unsigned int>(devMajor) << 16) | devMinor); }
 
-  void BuildProgram(void* size, void* source) override {
-    // JIT is used in CreateKernel
+  // calculate MD5 checksum
+  std::string kernel_checksum(size_t size, void* source) {
+    // FNV-1a hashing, 64-bit version
+    const uint64_t FNV_prime = 0x100000001b3;
+    const uint64_t FNV_basis = 0xcbf29ce484222325;
+    uint64_t hash = FNV_basis;
+
+    const char *str = static_cast<const char *>(source);
+
+    size = size > FNV1A_CUTOFF_SIZE ? FNV1A_CUTOFF_SIZE : size;
+    for (auto i = 0; i < size; ++i) {
+      hash ^= *str++;
+      hash *= FNV_prime;
+    }
+    return std::to_string(hash);
   }
 
-  void* CreateKernel(const char* name, void* size, void* source) override {
-#if KALMAR_DEBUG
-    std::cout << "kernel name : " << name << "\n";
-#endif
+  void BuildProgram(void* size, void* source) override {
+    if (programs.find(kernel_checksum((size_t)size, source)) == programs.end()) {
+      size_t ptx_size = (size_t)((void *)size);
+      char *ptx_source = (char*)malloc(ptx_size+1);
+      memcpy(ptx_source, source, ptx_size);
+      ptx_source[ptx_size] = '\0';
+      JITCompileAndCache(ptx_source, ptx_size);
+      free(ptx_source);
+      ptx_source = nullptr;
+    }
+  }
 
+  void JITCompileAndCache(void* ptx_source, int size) {
     // In case in multiple threading, grant the kernel thread a valid CUDA context
     CheckCudaError(cuCtxSetCurrent(deviceCtx));
 
-    std::string str(name);
-    CUfunction function;
-    CUmodule module = programs[str];
-    if (!module) {
-      size_t ptx_size = (size_t)((void *)size);
-      char *ptx_source = (char*)malloc(ptx_size + 1);
-      memcpy(ptx_source, source, ptx_size);
-      ptx_source[ptx_size] = '\0';
+    std::string index = kernel_checksum((size_t)size, ptx_source);
+    if (programs.find(index) == programs.end()) {
+      CUmodule module;
 
 #if KALMAR_DEBUG
       //std::cout << ptx_source;
@@ -1199,16 +1219,43 @@ public:
 #else
       CheckCudaError(cuModuleLoadDataEx(&module, ptx_source, 0, nullptr, nullptr));
 #endif 
-      free(ptx_source);
-      ptx_source = nullptr;
 
-      programs[str] = module;
+      programs[index] = module;
     }
 
-    CheckCudaError(cuModuleGetFunction(&function, module, name));
-    CudaExecution *thin = new CudaExecution(this, module, function);
+  }
+
+  void* CreateKernel(const char* name) override {
+#if KALMAR_DEBUG
+    std::cout << "kernel name : " << name << "\n";
+#endif
+
+    // In case in multiple threading, grant the kernel thread a valid CUDA context
+    CheckCudaError(cuCtxSetCurrent(deviceCtx));
+
+    std::string str(name);
+    stFM x = functions[str];
+    CUfunction function = x.f;
+    if (!function) {
+      if (programs.size() != 0) {
+        for (auto ite : programs) {
+          if (cuModuleGetFunction(&x.f, ite.second, name) == CUDA_SUCCESS) {
+            x.m = ite.second;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!x.m) {
+      std::cerr << "CudaDevice::CreateKernel() fails\n";
+      abort();
+    }
+
+    functions[str] = x;
+    CudaExecution *thin = new CudaExecution(this, x.m, x.f);
     thin->clearArgs();
-  
+
     return thin;
   }
 
@@ -1315,6 +1362,13 @@ public:
     for (auto& it : programs)
       CheckCudaError(cuModuleUnload(it.second));
     programs.clear();
+
+    for (auto& it: functions) {
+      it.second.f = nullptr;
+      it.second.m = nullptr;
+    }
+    functions.clear();
+
 #if KALMAR_DEBUG
     std::cout << "Destroy context: " << deviceCtx << "\n";
 #endif
@@ -1328,6 +1382,8 @@ private:
     std::wstring description;
     size_t deviceMemBytes;   // device memory in bytes
     std::map<std::string, CUmodule> programs;
+    typedef struct { CUfunction f; CUmodule m; } stFM;
+    std::map<std::string, stFM> functions;
     std::mutex queues_mutex;
     std::vector< std::weak_ptr<KalmarQueue> > queues;
 protected:
