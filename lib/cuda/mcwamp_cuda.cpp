@@ -54,11 +54,6 @@
 // ROCR 1.2 runtime implementation currently provides this guarantee when using SDMA queues and compute shaders.
 #define FORCE_SIGNAL_DEP_BETWEEN_COPIES (0)
 
-// cutoff size used in FNV-1a hash function
-// default set as 768, this is a heuristic value
-// which is larger than HSA BrigModuleHeader and AMD GCN ISA header (Elf64_Ehdr)
-#define FNV1A_CUTOFF_SIZE (768)
-
 extern "C" void PushArgImpl(void *k_, int idx, size_t sz, const void *s);
 extern "C" void PushArgPtrImpl(void *k_, int idx, size_t sz, const void *s);
 
@@ -1147,7 +1142,6 @@ public:
 
     const char *str = static_cast<const char *>(source);
 
-    size = size > FNV1A_CUTOFF_SIZE ? FNV1A_CUTOFF_SIZE : size;
     for (auto i = 0; i < size; ++i) {
       hash ^= *str++;
       hash *= FNV_prime;
